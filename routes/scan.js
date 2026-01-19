@@ -15,6 +15,7 @@ import {
   evaluateSwing,
   evaluateLongTerm
 } from '../services/positionEvaluator.js'
+import { fetchFundamentals } from '../services/marketData.js'
 
 
 const router = express.Router();
@@ -145,10 +146,29 @@ const swingView = evaluateSwing({
   gapOpenPct: gapData.gapOpenPct
 })
 
+const fundamentals = await fetchFundamentals(resolvedSymbol)
+
+// simple analyst tone from news
+const analystSentiment =
+  sentiment === 'positive' ? 'positive' :
+  sentiment === 'negative' ? 'negative' :
+  'neutral'
+
+const marketPosition =
+  gapData.marketCap > 5e11 ? 'leader' :
+  gapData.marketCap > 1e11 ? 'challenger' :
+  'emerging'
+
 const longTermView = evaluateLongTerm({
   rsi,
-  marketCap: gapData.marketCap
+  marketCap: gapData.marketCap,
+  fundamentals: {
+    ...fundamentals,
+    analystSentiment,
+    marketPosition
+  }
 })
+
 
 
           /* =====================

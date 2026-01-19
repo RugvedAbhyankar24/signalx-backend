@@ -376,3 +376,23 @@ export async function fetchMarketMovers() {
       changePct: s.pChange
     }))
 }
+export async function fetchFundamentals(symbolBase) {
+  try {
+    const res = await fetch(`https://www.screener.in/company/${symbolBase}/`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    })
+    const html = await res.text()
+
+    const extract = (regex) =>
+      Number(html.match(regex)?.[1]?.replace(/,/g, '')) || null
+
+    return {
+      revenueGrowth: extract(/Sales Growth[^%]*([\d.]+)%/i),
+      profitGrowth: extract(/Profit Growth[^%]*([\d.]+)%/i),
+      roe: extract(/ROE[^%]*([\d.]+)%/i),
+      debtToEquity: extract(/Debt to Equity[^:]*([\d.]+)/i)
+    }
+  } catch {
+    return null
+  }
+}
