@@ -261,3 +261,159 @@ if (rsi > 65 && score >= 4) {
   }
 }
 
+/**
+ * ==================================================
+ * INTRADAY EVALUATION
+ * Horizon: Same day trading
+ *
+ * Philosophy:
+ * - Momentum + Volume + Price Action
+ * - Quick entries and exits
+ * - Focus on liquid stocks with clear direction
+ * ==================================================
+ */
+export function evaluateIntraday({
+  rsi,
+  gapOpenPct,
+  gapNowPct,
+  volumeSpike,
+  price,
+  vwap,
+  support,
+  resistance,
+  candleColor,
+  marketCap
+}) {
+  const reasons = []
+  
+  const aboveVWAP = price > vwap
+  const belowVWAP = price < vwap
+  const nearResistance = resistance && price >= resistance * 0.98
+  const nearSupport = support && price <= support * 1.02
+  const effectiveGap = gapNowPct || gapOpenPct
+  
+  // Filter for liquid stocks (market cap > 1000 cr)
+  if (!marketCap || marketCap < 1e10) {
+    reasons.push('Insufficient liquidity for intraday trading')
+    return {
+      label: 'Low Liquidity - Avoid',
+      sentiment: 'negative',
+      reasons
+    }
+  }
+
+  /* =========================
+     1️⃣ STRONG INTRADAY BUY
+  ========================== */
+  if (
+    rsi >= 45 &&
+    rsi <= 65 &&
+    effectiveGap > 0.5 &&
+    effectiveGap < 2.5 &&
+    volumeSpike &&
+    aboveVWAP &&
+    candleColor === 'green' &&
+    !nearResistance
+  ) {
+    reasons.push('Gap up with strong volume confirmation')
+    reasons.push('Price above VWAP shows bullish momentum')
+    reasons.push('RSI in optimal intraday range (45-65)')
+    reasons.push('Green candle confirms buying pressure')
+
+    return {
+      label: 'Strong Intraday Buy',
+      sentiment: 'positive',
+      reasons
+    }
+  }
+
+  /* =========================
+     2️⃣ MOMENTUM CONTINUATION
+  ========================== */
+  if (
+    rsi >= 50 &&
+    rsi <= 70 &&
+    volumeSpike &&
+    aboveVWAP &&
+    candleColor === 'green' &&
+    effectiveGap > 0
+  ) {
+    reasons.push('Momentum continuation with volume support')
+    reasons.push('Trading above key VWAP level')
+    reasons.push('RSI shows sustained bullish momentum')
+
+    return {
+      label: 'Momentum Continuation',
+      sentiment: 'positive',
+      reasons
+    }
+  }
+
+  /* =========================
+     3️⃣ BREAKOUT PLAY
+  ========================== */
+  if (
+    nearResistance &&
+    volumeSpike &&
+    rsi >= 55 &&
+    rsi <= 75 &&
+    candleColor === 'green'
+  ) {
+    reasons.push('Breaking resistance with high volume')
+    reasons.push('RSI indicates strength for breakout')
+    reasons.push('Volume confirms institutional participation')
+
+    return {
+      label: 'Breakout Candidate',
+      sentiment: 'positive',
+      reasons
+    }
+  }
+
+  /* =========================
+     4️⃣ AVOID - OVERBOUGHT
+  ========================== */
+  if (rsi > 75) {
+    reasons.push('RSI extremely overbought (>75)')
+    reasons.push('High risk of reversal or profit booking')
+    reasons.push('Unfavorable risk-reward for fresh entry')
+
+    return {
+      label: 'Overbought - Avoid',
+      sentiment: 'negative',
+      reasons
+    }
+  }
+
+  /* =========================
+     5️⃣ AVOID - BELOW VWAP
+  ========================== */
+  if (
+    belowVWAP &&
+    candleColor === 'red' &&
+    effectiveGap < -0.5
+  ) {
+    reasons.push('Trading below VWAP with bearish momentum')
+    reasons.push('Gap down indicates weakness')
+    reasons.push('Red candle confirms selling pressure')
+
+    return {
+      label: 'Bearish Momentum - Avoid',
+      sentiment: 'negative',
+      reasons
+    }
+  }
+
+  /* =========================
+     6️⃣ DEFAULT: NO CLEAR SIGNAL
+  ========================== */
+  reasons.push('No clear intraday signal detected')
+  reasons.push('Insufficient momentum or volume confirmation')
+
+  return {
+    label: 'No Clear Intraday Signal',
+    sentiment: 'neutral',
+    reasons
+  }
+}
+
