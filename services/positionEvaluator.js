@@ -23,21 +23,33 @@ export function evaluateSwing({
   const aboveVWAP = price > vwap
   const nearResistance = resistance && price >= resistance * 0.97
   const nearSupport = support && price <= support * 1.05
+  const volumeOK = volumeSpike || (price > vwap && rsi > 50)
+
+  // Gap segregation - eliminate event-driven volatility
+  const isGapDay = Math.abs(gapOpenPct) >= 1.2
+
+  if (isGapDay && !volumeSpike) {
+    return {
+      label: 'Gap Day – Avoid Swing',
+      sentiment: 'negative',
+      reasons: ['Gap-driven volatility unsuitable for swing trades']
+    }
+  }
 
   /* =========================
      1️⃣ HIGH-CONVICTION SWING
   ========================== */
   if (
-    rsi >= 48 &&
-    rsi <= 60 &&
-    Math.abs(gapOpenPct) <= 0.8 &&
-    volumeSpike &&
+    rsi >= 45 &&
+    rsi <= 65 &&
+    Math.abs(gapOpenPct) <= 2.0 &&
+    volumeOK &&
     aboveVWAP &&
     !nearResistance
   ) {
-    reasons.push('Healthy momentum in institutional RSI zone')
-    reasons.push('Price above VWAP indicates favorable cost structure')
-    reasons.push('Volume expansion confirms smart money participation')
+    reasons.push('Momentum in favorable RSI zone')
+    reasons.push('Price above VWAP indicates bullish structure')
+    reasons.push(volumeSpike ? 'Volume confirms participation' : 'Building momentum')
 
     return {
       label: 'High-Quality Swing Setup',
@@ -50,19 +62,18 @@ export function evaluateSwing({
      2️⃣ EARLY MOMENTUM (WATCH)
   ========================== */
   if (
-    rsi >= 42 &&
-    rsi < 48 &&
-    volumeSpike &&
-    aboveVWAP &&
+    rsi >= 35 &&
+    rsi < 50 &&
+    volumeOK &&
     !nearResistance
   ) {
-    reasons.push('Early momentum emerging after consolidation')
-    reasons.push('Volume pickup suggests accumulation')
-    reasons.push('Await further confirmation before entry')
+    reasons.push('Early momentum emerging')
+    reasons.push(aboveVWAP ? 'Price above VWAP is bullish' : 'Building base below VWAP')
+    reasons.push(volumeSpike ? 'Volume pickup suggests accumulation' : 'Watch for volume confirmation')
 
     return {
       label: 'Potential Swing – Needs Confirmation',
-      sentiment: 'neutral',
+      sentiment: 'positive',
       reasons
     }
   }
@@ -71,26 +82,68 @@ export function evaluateSwing({
      3️⃣ SUPPORT-BASED BOUNCE
   ========================== */
   if (
-    rsi >= 38 &&
-    rsi <= 45 &&
+    rsi >= 30 &&
+    rsi <= 55 &&
     nearSupport &&
-    volumeSpike
+    (aboveVWAP || volumeSpike)
   ) {
     reasons.push('Price reacting near support zone')
-    reasons.push('Controlled pessimism with institutional interest')
-    reasons.push('Suitable only for tactical swing traders')
+    reasons.push(volumeSpike ? 'Volume confirms institutional interest' : 'Watch for volume confirmation')
+    reasons.push('Suitable for tactical swing entry')
 
     return {
       label: 'Support-Based Swing Attempt',
-      sentiment: 'neutral',
+      sentiment: 'positive',
       reasons
     }
   }
 
   /* =========================
-     4️⃣ CROWDED / LATE MOVE
+     4️⃣ MOMENTUM BREAKOUT
   ========================== */
-  if (rsi > 65) {
+  if (
+    rsi >= 45 &&
+    rsi <= 75 &&
+    nearResistance &&
+    volumeOK
+  ) {
+    reasons.push('Breaking resistance with momentum')
+    reasons.push(volumeSpike ? 'Volume confirms breakout strength' : 'Watch for volume on breakout')
+    reasons.push('High-potential swing setup')
+
+    return {
+      label: 'Breakout Swing Setup',
+      sentiment: 'positive',
+      reasons
+    }
+  }
+
+  /* =========================
+     5️⃣ CONSOLIDATION PLAY
+  ========================== */
+  if (
+    rsi >= 40 &&
+    rsi <= 60 &&
+    Math.abs(gapOpenPct) <= 1.0 &&
+    !nearResistance &&
+    !nearSupport &&
+    volumeOK
+  ) {
+    reasons.push('Stock in consolidation phase')
+    reasons.push('Awaiting breakout direction')
+    reasons.push(volumeSpike ? 'Volume suggests impending move' : 'Add to watchlist')
+
+    return {
+      label: 'Consolidation Watch',
+      sentiment: 'positive',
+      reasons
+    }
+  }
+
+  /* =========================
+     6️⃣ CROWDED / LATE MOVE
+  ========================== */
+  if (rsi > 75) {
     reasons.push('Momentum is overheated and crowded')
     reasons.push('Risk of sharp profit booking')
     reasons.push('Unfavorable risk–reward for fresh entries')
@@ -103,9 +156,9 @@ export function evaluateSwing({
   }
 
   /* =========================
-     5️⃣ GAP RISK / STRUCTURE WEAK
+     7️⃣ GAP RISK / STRUCTURE WEAK
   ========================== */
-  if (Math.abs(gapOpenPct) > 1.5) {
+  if (Math.abs(gapOpenPct) > 2.0) {
     reasons.push('Large overnight gap increases volatility risk')
     reasons.push('Institutional desks prefer stability for swing trades')
 
@@ -117,7 +170,7 @@ export function evaluateSwing({
   }
 
   /* =========================
-     6️⃣ DEFAULT: NO EDGE
+     8️⃣ DEFAULT: NO EDGE
   ========================== */
   reasons.push('Momentum, liquidity, or structure not aligned')
   reasons.push('No institutional edge visible')
@@ -291,6 +344,21 @@ export function evaluateIntraday({
   const nearResistance = resistance && price >= resistance * 0.98
   const nearSupport = support && price <= support * 1.02
   const effectiveGap = gapNowPct || gapOpenPct
+  const volumeOK = volumeSpike || (price > vwap && rsi > 50)
+
+  // Protect against CHOP days - filter sideways markets
+  if (
+    Math.abs(effectiveGap) < 0.2 &&
+    !volumeSpike &&
+    Math.abs(price - vwap) / vwap < 0.002
+  ) {
+    reasons.push('Low volatility chop – intraday edge absent')
+    return {
+      label: 'Choppy Market – Avoid',
+      sentiment: 'neutral',
+      reasons
+    }
+  }
   
   // Filter for liquid stocks (market cap > 1000 cr)
   if (!marketCap || marketCap < 1e10) {
@@ -306,19 +374,17 @@ export function evaluateIntraday({
      1️⃣ STRONG INTRADAY BUY
   ========================== */
   if (
-    rsi >= 45 &&
-    rsi <= 65 &&
-    effectiveGap > 0.5 &&
-    effectiveGap < 2.5 &&
-    volumeSpike &&
+    rsi >= 48 && rsi <= 62 &&
+    effectiveGap >= 0.3 &&
+    effectiveGap < 3.0 &&
+    volumeOK &&
     aboveVWAP &&
-    candleColor === 'green' &&
     !nearResistance
   ) {
-    reasons.push('Gap up with strong volume confirmation')
-    reasons.push('Price above VWAP shows bullish momentum')
-    reasons.push('RSI in optimal intraday range (45-65)')
-    reasons.push('Green candle confirms buying pressure')
+    reasons.push(effectiveGap > 0.5 ? 'Gap up with momentum' : 'Positive price action')
+    reasons.push('Price above VWAP shows bullish structure')
+    reasons.push('RSI in favorable intraday range')
+    reasons.push(candleColor === 'green' ? 'Green candle confirms buying pressure' : 'Building momentum')
 
     return {
       label: 'Strong Intraday Buy',
@@ -331,16 +397,16 @@ export function evaluateIntraday({
      2️⃣ MOMENTUM CONTINUATION
   ========================== */
   if (
-    rsi >= 50 &&
-    rsi <= 70 &&
-    volumeSpike &&
+    rsi >= 48 &&
+    rsi <= 65 &&
+    volumeOK &&
     aboveVWAP &&
-    candleColor === 'green' &&
-    effectiveGap > 0
+    effectiveGap >= 0
   ) {
-    reasons.push('Momentum continuation with volume support')
+    reasons.push('Momentum continuation pattern')
     reasons.push('Trading above key VWAP level')
-    reasons.push('RSI shows sustained bullish momentum')
+    reasons.push(volumeSpike ? 'Volume supports the move' : 'Watch for volume confirmation')
+    reasons.push(candleColor === 'green' ? 'Bullish candle pattern' : 'Consolidating with upside bias')
 
     return {
       label: 'Momentum Continuation',
@@ -354,14 +420,13 @@ export function evaluateIntraday({
   ========================== */
   if (
     nearResistance &&
-    volumeSpike &&
-    rsi >= 55 &&
-    rsi <= 75 &&
-    candleColor === 'green'
+    volumeOK &&
+    rsi >= 50 &&
+    rsi <= 80
   ) {
-    reasons.push('Breaking resistance with high volume')
-    reasons.push('RSI indicates strength for breakout')
-    reasons.push('Volume confirms institutional participation')
+    reasons.push('Near resistance with breakout potential')
+    reasons.push(volumeSpike ? 'Volume indicates institutional interest' : 'Watch for volume on breakout')
+    reasons.push(candleColor === 'green' ? 'Bullish momentum toward resistance' : 'Consolidating before breakout')
 
     return {
       label: 'Breakout Candidate',

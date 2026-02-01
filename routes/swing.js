@@ -142,9 +142,15 @@ router.post('/', async (req, res) => {
 
     // Sort by signal strength
     positiveSwingStocks.sort((a, b) => {
-      const aScore = a.swingView.label === 'High-Quality Swing Setup' ? 3 : 1;
-      const bScore = b.swingView.label === 'High-Quality Swing Setup' ? 3 : 1;
-      return bScore - aScore;
+      const getScore = (stock) => {
+        if (stock.swingView.label === 'High-Quality Swing Setup') return 4;
+        if (stock.swingView.label === 'Breakout Swing Setup') return 3;
+        if (stock.swingView.label === 'Potential Swing – Needs Confirmation') return 2;
+        if (stock.swingView.label === 'Support-Based Swing Attempt') return 2;
+        if (stock.swingView.label === 'Consolidation Watch') return 1;
+        return 0;
+      };
+      return getScore(b) - getScore(a);
     });
 
     res.json({ 
