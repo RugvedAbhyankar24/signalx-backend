@@ -374,9 +374,10 @@ export function evaluateIntraday({
      1️⃣ STRONG INTRADAY BUY
   ========================== */
   if (
-    rsi >= 48 && rsi <= 62 &&
-    effectiveGap >= 0.3 &&
-    effectiveGap < 3.0 &&
+    rsi >= 40 &&
+    rsi <= 75 &&
+    effectiveGap >= 0.2 &&
+    effectiveGap < 3.5 &&
     volumeOK &&
     aboveVWAP &&
     !nearResistance
@@ -397,11 +398,10 @@ export function evaluateIntraday({
      2️⃣ MOMENTUM CONTINUATION
   ========================== */
   if (
-    rsi >= 48 &&
-    rsi <= 65 &&
-    volumeOK &&
+    rsi >= 45 &&
+    rsi <= 70 &&
     aboveVWAP &&
-    effectiveGap >= 0
+    effectiveGap >= -0.2
   ) {
     reasons.push('Momentum continuation pattern')
     reasons.push('Trading above key VWAP level')
@@ -436,7 +436,48 @@ export function evaluateIntraday({
   }
 
   /* =========================
-     4️⃣ AVOID - OVERBOUGHT
+     4️⃣ MODERATE MOMENTUM (NEUTRAL-POSITIVE)
+  ========================== */
+  if (
+    rsi >= 45 &&
+    rsi <= 70 &&
+    aboveVWAP &&
+    effectiveGap >= -0.3
+  ) {
+    reasons.push('Moderate momentum with VWAP support')
+    reasons.push(volumeSpike ? 'Volume confirms interest' : 'Awaiting volume confirmation')
+    reasons.push(candleColor === 'green' ? 'Bullish bias' : 'Consolidating with upside potential')
+
+    return {
+      label: 'Moderate Momentum - Watch',
+      sentiment: 'positive',
+      reasons
+    }
+  }
+
+  /* =========================
+     5️⃣ CONSOLIDATION BREAKOUT POTENTIAL
+  ========================== */
+  if (
+    rsi >= 40 &&
+    rsi <= 60 &&
+    Math.abs(effectiveGap) <= 0.5 &&
+    !nearResistance &&
+    !nearSupport
+  ) {
+    reasons.push('Consolidation phase - watch for breakout')
+    reasons.push(volumeSpike ? 'Volume suggests impending move' : 'Low volatility - add to watchlist')
+    reasons.push(aboveVWAP ? 'Above VWAP provides support' : 'Below VWAP - needs confirmation')
+
+    return {
+      label: 'Consolidation Watch',
+      sentiment: 'positive',
+      reasons
+    }
+  }
+
+  /* =========================
+     6️⃣ AVOID - OVERBOUGHT
   ========================== */
   if (rsi > 75) {
     reasons.push('RSI extremely overbought (>75)')
