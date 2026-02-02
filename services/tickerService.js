@@ -1,7 +1,8 @@
-import { fetchNSE } from './marketData.js'
+import { fetchNSE, fetchIndexOHLC } from './marketData.js'
 
 const INDICES = [
   'NIFTY 50',
+  'SENSEX',
   'NIFTY BANK',
   'NIFTY FINANCIAL SERVICES',
   'NIFTY MIDCAP SELECT',
@@ -25,31 +26,69 @@ const INDICES = [
    INDICES SNAPSHOT
 ============================ */
 export async function fetchIndicesSnapshot() {
-  const res = await fetchNSE('/allIndices')
-  const rows = res?.data || []
+  try {
+    // Fetch NSE indices
+    const nseRes = await fetchNSE('/allIndices')
+    const nseRows = nseRes?.data || []
 
-  return rows
-    .filter(i => INDICES.includes(i.index))
-    .map(i => {
-      const last = Number(i.last)
-      const prev = Number(i.previousClose)
+    // Fetch Sensex data separately
+    let sensexData = null
+    try {
+      sensexData = await fetchIndexOHLC('SENSEX')
+    } catch (sensexError) {
+      console.log('Sensex data fetch failed:', sensexError.message)
+    }
 
-      let changePct = null
-      let direction = 'neutral'
+    // Process NSE indices (excluding SENSEX since we handle it separately)
+    const nseIndices = nseRows
+      .filter(i => INDICES.includes(i.index) && i.index !== 'SENSEX')
+      .map(i => {
+        const last = Number(i.last)
+        const prev = Number(i.previousClose)
 
-      if (Number.isFinite(last) && Number.isFinite(prev) && prev > 0) {
-        changePct = ((last - prev) / prev) * 100
-        direction =
-          changePct > 0 ? 'up' : changePct < 0 ? 'down' : 'neutral'
-      }
+        let changePct = null
+        let direction = 'neutral'
 
-      return {
-        name: i.index,
-        last,
-        changePct,
-        direction
-      }
+        if (Number.isFinite(last) && Number.isFinite(prev) && prev > 0) {
+          changePct = ((last - prev) / prev) * 100
+          direction =
+            changePct > 0 ? 'up' : changePct < 0 ? 'down' : 'neutral'
+        }
+
+        return {
+          name: i.index,
+          last,
+          changePct,
+          direction
+        }
+      })
+
+    // Add Sensex data if available
+    const allIndices = [...nseIndices]
+    if (sensexData) {
+      const sensexChangePct = sensexData.changePct
+      const sensexDirection = sensexChangePct > 0 ? 'up' : sensexChangePct < 0 ? 'down' : 'neutral'
+      
+      allIndices.push({
+        name: 'SENSEX',
+        last: sensexData.last,
+        changePct: sensexChangePct,
+        direction: sensexDirection
+      })
+    }
+
+    // Sort indices according to INDICES array order
+    allIndices.sort((a, b) => {
+      const indexA = INDICES.indexOf(a.name)
+      const indexB = INDICES.indexOf(b.name)
+      return indexA - indexB
     })
+
+    return allIndices
+  } catch (error) {
+    console.error('Error fetching indices snapshot:', error)
+    return []
+  }
 }
 
 

@@ -195,12 +195,54 @@ export async function fetchIndexOHLC(indexName) {
   }
 
   // -----------------------
-  // BSE: SENSEX (YAHOO)
+  // BSE: SENSEX (Simplified API Implementation)
   // -----------------------
 if (name === 'SENSEX') {
+  try {
+    // Try BSE web scraping first - most reliable
+    const bseWebResponse = await fetch('https://www.bseindia.com/sensex/', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    })
+    
+    if (bseWebResponse.ok) {
+      const html = await bseWebResponse.text()
+      // Extract Sensex value from HTML using regex patterns
+      const sensexMatch = html.match(/class="sensexval"[^>]*>([\d,]+\.?\d*)/i) || 
+                          html.match(/id="sensexvalue"[^>]*>([\d,]+\.?\d*)/i) ||
+                          html.match(/SENSEX[^>]*>([\d,]+\.?\d*)/i)
+      
+      const changeMatch = html.match(/class="sensexchange"[^>]*>([+-]?[\d,]+\.?\d*)/i) ||
+                          html.match(/id="sensexchange"[^>]*>([+-]?[\d,]+\.?\d*)/i)
+      
+      const percentMatch = html.match(/class="sensexpercent"[^>]*>([+-]?[\d,]+\.?\d*)/i) ||
+                           html.match(/id="sensexpercent"[^>]*>([+-]?[\d,]+\.?\d*)/i)
+      
+      if (sensexMatch) {
+        const sensexValue = parseFloat(sensexMatch[1].replace(/,/g, ''))
+        const changeValue = changeMatch ? parseFloat(changeMatch[1].replace(/,/g, '')) : null
+        const changePercent = percentMatch ? parseFloat(percentMatch[1].replace(/,/g, '')) : null
+        
+        return {
+          open: null,
+          high: null,
+          low: null,
+          prevClose: changeValue && sensexValue ? sensexValue - changeValue : null,
+          last: sensexValue,
+          changePct: changePercent,
+          source: 'BSE Web Scraped'
+        }
+      }
+    }
+  } catch (scrapeError) {
+    console.log('Web scraping failed, trying Yahoo:', scrapeError.message)
+  }
+
+  // Fallback to Yahoo Finance
   const chart = await yahooChart('^BSESN', {
-    range: '5d',
-    interval: '1d'
+    range: '1d',
+    interval: '5m'  // 5-minute intervals for more recent data
   })
 
   const meta = chart?.meta
@@ -211,22 +253,13 @@ if (name === 'SENSEX') {
   }
 
   const closes = quote.close.filter(v => v != null)
-
   const last = meta.regularMarketPrice ?? closes[closes.length - 1]
-
-  const prevClose =
-    meta.regularMarketPreviousClose ??
-    meta.previousClose ??
-    closes[closes.length - 2]
+  const prevClose = meta.regularMarketPreviousClose ?? meta.previousClose ?? closes[closes.length - 2]
 
   let changePct = null
-
-  // ✅ Best case: Yahoo already gives it
   if (typeof meta.regularMarketChangePercent === 'number') {
     changePct = meta.regularMarketChangePercent
-  }
-  // ✅ Fallback: calculate safely
-  else if (prevClose && last) {
+  } else if (prevClose && last) {
     changePct = ((last - prevClose) / prevClose) * 100
   }
 
