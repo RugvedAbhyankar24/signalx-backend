@@ -213,6 +213,7 @@ const longTermView = evaluateLongTerm({
               headline: n.headline,
               url: n.url,
               source: n.source,
+              datetime: n.datetime,
               keywords: n.keywords
             })),
             resolvedSymbol,
