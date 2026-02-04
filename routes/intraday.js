@@ -7,7 +7,7 @@ import {
   detectBreakout
 } from '../services/technicalIndicators.js';
 import { computeRSI } from '../services/rsiCalculator.js';
-import { evaluateIntraday } from '../services/positionEvaluator.js';
+import { evaluateIntraday, calculateIntradayEntryPrice } from '../services/positionEvaluator.js';
 import { resolveNSESymbol } from '../services/marketData.js';
 
 const router = express.Router();
@@ -102,6 +102,20 @@ router.post('/', async (req, res) => {
           });
 
           /* =====================
+             ENTRY PRICE CALCULATION
+          ====================== */
+          const entryPriceData = calculateIntradayEntryPrice({
+            price: gapData.currentPrice,
+            vwap,
+            support,
+            resistance,
+            rsi,
+            candleColor,
+            gapOpenPct: gapData.gapOpenPct,
+            volumeSpike: volumeData.volumeSpike
+          });
+
+          /* =====================
              RESPONSE
           ====================== */
           return {
@@ -127,7 +141,16 @@ router.post('/', async (req, res) => {
             resistance,
 
             resolvedSymbol,
-            intradayView
+            intradayView,
+            
+            // Entry price information
+            entryPrice: entryPriceData.entryPrice,
+            stopLoss: entryPriceData.stopLoss,
+            target1: entryPriceData.target1,
+            target2: entryPriceData.target2,
+            entryReason: entryPriceData.entryReason,
+            entryType: entryPriceData.entryType,
+            riskReward: entryPriceData.riskReward
           };
         } catch (e) {
           return {

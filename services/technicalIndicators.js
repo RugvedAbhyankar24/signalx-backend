@@ -23,6 +23,21 @@ export function calculateVWAP(candles) {
   return vol === 0 ? null : +(pv / vol).toFixed(2);
 }
 
+export function calculateSwingVWAP(candles, days = 5) {
+  // Calculate 5-day VWAP for swing trading (institutional approach)
+  const swingCandles = candles.slice(-(days * 20)); // Approx 5 trading days
+  let pv = 0;
+  let vol = 0;
+
+  swingCandles.forEach(c => {
+    const typicalPrice = (c.high + c.low + c.close) / 3;
+    pv += typicalPrice * c.volume;
+    vol += c.volume;
+  });
+
+  return vol === 0 ? null : +(pv / vol).toFixed(2);
+}
+
 export function supportResistance(candles, lookback = 20) {
   const recent = candles.slice(-lookback);
   return {

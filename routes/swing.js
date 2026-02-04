@@ -3,11 +3,12 @@ import { fetchGapData, fetchOHLCV, fetchMarketMovers } from '../services/marketD
 import {
   detectVolumeSpike,
   calculateVWAP,
+  calculateSwingVWAP,
   supportResistance,
   detectBreakout
 } from '../services/technicalIndicators.js';
 import { computeRSI } from '../services/rsiCalculator.js';
-import { evaluateSwing } from '../services/positionEvaluator.js';
+import { evaluateSwing, calculateSwingEntryPrice } from '../services/positionEvaluator.js';
 import { resolveNSESymbol } from '../services/marketData.js';
 
 const router = express.Router();
@@ -76,6 +77,7 @@ router.post('/', async (req, res) => {
           ====================== */
           const volumeData = detectVolumeSpike(candles);
           const vwap = calculateVWAP(candles);
+          const swingVwap = calculateSwingVWAP(candles, 5); // 5-day VWAP for swing
           const { support, resistance } = supportResistance(candles);
 
           const candleColor =
@@ -93,10 +95,46 @@ router.post('/', async (req, res) => {
             gapOpenPct: gapData.gapOpenPct,
             volumeSpike: volumeData.volumeSpike,
             price: gapData.currentPrice,
-            vwap,
+            vwap: swingVwap, // Use swing VWAP for swing evaluation
             support,
             resistance
           });
+
+          /* =====================
+             SWING ENTRY PRICE CALCULATION
+          ====================== */
+          const swingEntryPriceData = calculateSwingEntryPrice({
+            price: gapData.currentPrice,
+            vwap: swingVwap, // Use swing VWAP for entry price calculation
+            support,
+            resistance,
+            rsi,
+            candleColor,
+            gapOpenPct: gapData.gapOpenPct,
+            volumeSpike: volumeData.volumeSpike
+          });
+
+          /* =====================
+             CRITICAL RISK/REWARD VALIDATION
+          ====================== */
+          const riskRewardRatio = (swingEntryPriceData.target1 - swingEntryPriceData.entryPrice) / (swingEntryPriceData.entryPrice - swingEntryPriceData.stopLoss);
+          
+          if (riskRewardRatio < 1) {
+            // Institutional rule: Reject trades with RR < 1:1
+            return {
+              symbol,
+              normalizedSymbol: normalized,
+              companyName: gapData.companyName || symbol,
+              currentPrice: gapData.currentPrice,
+              swingView: {
+                label: 'Weak Risk-Reward – Avoid Swing',
+                sentiment: 'negative',
+                reasons: ['Risk-reward below institutional threshold (1:1)']
+              },
+              riskReward: riskRewardRatio.toFixed(2),
+              filtered: true // Mark as filtered out
+            };
+          }
 
           /* =====================
              RESPONSE
@@ -120,11 +158,21 @@ router.post('/', async (req, res) => {
 
             volume: volumeData,
             vwap,
+            swingVwap, // Add swing VWAP for debugging
             support,
             resistance,
 
             resolvedSymbol,
-            swingView
+            swingView,
+
+            // Swing entry price information
+            entryPrice: swingEntryPriceData.entryPrice,
+            stopLoss: swingEntryPriceData.stopLoss,
+            target1: swingEntryPriceData.target1,
+            target2: swingEntryPriceData.target2,
+            entryReason: swingEntryPriceData.entryReason,
+            entryType: swingEntryPriceData.entryType,
+            riskReward: swingEntryPriceData.riskReward
           };
         } catch (e) {
           return {
@@ -135,9 +183,12 @@ router.post('/', async (req, res) => {
       })
     );
 
-    // Filter only positive swing stocks
+    // Filter only positive swing stocks that pass risk/reward validation
     const positiveSwingStocks = results.filter(
-      stock => !stock.error && stock.swingView && stock.swingView.sentiment === 'positive'
+      stock => !stock.error && 
+               !stock.filtered && // Exclude risk/reward filtered stocks
+               stock.swingView && 
+               stock.swingView.sentiment === 'positive'
     );
 
     // Sort by signal strength
