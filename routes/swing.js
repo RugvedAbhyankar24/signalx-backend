@@ -1,5 +1,5 @@
 import express from 'express';
-import { fetchGapData, fetchOHLCV, fetchMarketMovers } from '../services/marketData.js';
+import { fetchGapData, fetchOHLCV, fetchMarketMovers, fastMarketScan } from '../services/marketData.js';
 import {
   detectVolumeSpike,
   calculateVWAP,
@@ -25,19 +25,34 @@ function isLikelyInvalidSymbol(symbol) {
 }
 
 router.post('/', async (req, res) => {
-  const { symbols, rsiPeriod = 14 } = req.body || {};
+  const { symbols, rsiPeriod = 14, useTwoStageScan = true } = req.body || {};
 
   try {
-    // If no symbols provided, fetch NSE500 stocks
+    // If no symbols provided, use institutional-grade scanning
     let symbolsToScan = symbols;
     if (!symbols || symbols.length === 0) {
-      const marketMovers = await fetchMarketMovers();
-      symbolsToScan = marketMovers.map(stock => stock.symbol);
+      if (useTwoStageScan) {
+        // TWO-STAGE SCANNING (PRO LEVEL)
+        
+        // Stage 1 - Fast scan (cheap) - get 30-50 qualified stocks
+        const fastScanResults = await fastMarketScan();
+        console.log(`🔍 Swing Stage 1: Fast scanned ${fastScanResults.length} stocks`);
+        
+        // Stage 2 - Deep scan (expensive) - apply full technical analysis
+        console.log('🔬 Swing Stage 2: Deep scanning with swing analysis...');
+        symbolsToScan = fastScanResults.map(stock => stock.symbol);
+      } else {
+        // Legacy approach - use improved fetchMarketMovers
+        const marketMovers = await fetchMarketMovers();
+        symbolsToScan = marketMovers.map(stock => stock.symbol);
+      }
     }
 
     if (!Array.isArray(symbolsToScan) || symbolsToScan.length === 0) {
       return res.status(400).json({ error: 'No symbols to scan' });
     }
+
+    console.log(`📈 Processing ${symbolsToScan.length} symbols for swing analysis...`);
 
     const results = await Promise.all(
       symbolsToScan.map(async (symbol) => {
@@ -208,7 +223,13 @@ router.post('/', async (req, res) => {
       positiveSwingStocks,
       totalScanned: results.length,
       positiveCount: positiveSwingStocks.length,
-      meta: { rsiPeriod }
+      meta: { 
+        rsiPeriod,
+        scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
+        stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
+        institutionalFiltering: true,
+        riskRewardThreshold: '1:1 minimum'
+      }
     });
   } catch (err) {
     console.error('swing scan error', err);

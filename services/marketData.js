@@ -396,17 +396,65 @@ export async function resolveNSESymbol(query) {
   return best.symbol
 }
 
+/* =====================
+   FAST SCAN (Stage 1)
+====================== */
+export async function fastMarketScan() {
+  const data = await fetchNSE('/equity-stockIndices?index=NIFTY%20500')
+  const stocks = data?.data || []
+
+  return stocks
+    .filter(s => {
+      // Stage 1: Fast, cheap filters
+      const movement = Math.abs(s.pChange || 0)
+      const price = s.lastPrice || 0
+      const volume = s.totalTradedVolume || 0
+      
+      return (
+        movement >= 0.5 &&           // Lower threshold for initial scan
+        price > 10 &&                 // Basic price filter
+        volume > 50000               // Basic volume filter
+      )
+    })
+    .sort((a, b) => Math.abs(b.pChange || 0) - Math.abs(a.pChange || 0))
+    .slice(0, 50)                    // Shortlist 30-50 stocks for deep scan
+    .map(s => ({
+      symbol: s.symbol,
+      price: s.lastPrice,
+      changePct: s.pChange,
+      volume: s.totalTradedVolume,
+      movement: Math.abs(s.pChange || 0),
+      // Quick gap calculation if previous close available
+      gapPct: s.previousClose ? ((s.lastPrice - s.previousClose) / s.previousClose) * 100 : null
+    }))
+}
+
 export async function fetchMarketMovers() {
   const data = await fetchNSE('/equity-stockIndices?index=NIFTY%20500')
 
   const stocks = data?.data || []
 
   return stocks
-    .slice(0, 12)
+    .filter(s => {
+      // Pre-filtering criteria - institutional grade
+      const movement = Math.abs(s.pChange || 0)
+      const price = s.lastPrice || 0
+      const volume = s.totalTradedVolume || 0
+      
+      return (
+        movement >= 1 &&           // At least 1% movement
+        price > 20 &&              // Avoid illiquid junk
+        volume > 100000            // Minimum liquidity threshold
+      )
+    })
+    .sort((a, b) => Math.abs(b.pChange || 0) - Math.abs(a.pChange || 0))
+    .slice(0, 30)                 // Take top 30 qualified movers
     .map(s => ({
       symbol: s.symbol,
       price: s.lastPrice,
-      changePct: s.pChange
+      changePct: s.pChange,
+      volume: s.totalTradedVolume,
+      movement: Math.abs(s.pChange || 0)  // Add movement magnitude for sorting
     }))
 }
 export async function fetchFundamentals(symbolBase) {
