@@ -4,7 +4,6 @@ const YF_BASE = 'https://query1.finance.yahoo.com/v8/finance/chart';
 const YF_QUOTE = 'https://query1.finance.yahoo.com/v7/finance/quote';
 const NSE_HOME = 'https://www.nseindia.com';
 const NSE_API = 'https://www.nseindia.com/api';
-let cookies = ''
 /* =====================
    YAHOO CHART FETCH
 ====================== */
@@ -31,17 +30,6 @@ export async function fetchCompanyMeta(symbol) {
     companyName: info.companyName || info.symbol || base,
     industry: info.industry || securityInfo.industry || info.sector,
   };
-}
-
-async function initNSESession() {
-  const res = await fetch(NSE_HOME, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0',
-      Accept: 'text/html'
-    }
-  })
-
-  cookies = res.headers.get('set-cookie')
 }
 
 /* =====================
@@ -165,17 +153,9 @@ export async function fetchIndexOHLC(indexName) {
   }
 
   if (nseMap[name]) {
-    if (!cookies) await initNSESession()
-
     const url = `${NSE_API}/equity-stockIndices?index=${nseMap[name]}`
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        Accept: 'application/json',
-        Cookie: cookies,
-        Referer: NSE_HOME
-      }
-    })
+    const headers = await getNSEHeaders()
+    const res = await fetch(url, { headers })
 
     if (!res.ok) throw new Error(`NSE index fetch failed (${res.status})`)
 
@@ -334,11 +314,21 @@ async function getNSEHeaders() {
   return headers;
 }
 
-export async function fetchNSE(path) {
-  const headers = await getNSEHeaders();
-  const res = await fetch(`${NSE_API}${path}`, { headers });
-  if (!res.ok) throw new Error(`NSE request failed (${res.status})`);
-  return res.json();
+export async function fetchNSE(path, retries = 1) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const headers = await getNSEHeaders();
+      const res = await fetch(`${NSE_API}${path}`, { headers });
+      if (!res.ok) throw new Error(`NSE request failed (${res.status})`);
+      return res.json();
+    } catch (error) {
+      if (i === retries - 1) throw error;
+      // Force cookie refresh on retry
+      nseCookie = null;
+      nseCookieTime = 0;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
 }
 
 async function fetchNSEQuote(symbolBase) {
