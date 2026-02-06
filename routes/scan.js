@@ -9,13 +9,77 @@ import {
 
 import { computeRSI, categorizeRSI } from '../services/rsiCalculator.js';
 import { fetchCompanyNews, classifySentiment } from '../services/newsService.js';
-import { makeDecision } from '../services/decisionEngine.js';
 import { resolveNSESymbol } from '../services/marketData.js'
 import {
   evaluateSwing,
-  evaluateLongTerm
+  evaluateLongTerm,
+  evaluateIntraday
 } from '../services/positionEvaluator.js'
 import { fetchFundamentals } from '../services/marketData.js'
+
+// GAP CONTEXT HELPER
+function getGapContext(gapOpenPct, gapNowPct) {
+  const effectiveGap = gapNowPct ?? gapOpenPct;
+  
+  if (effectiveGap === null || Math.abs(effectiveGap) < 0.8) {
+    return 'NO_GAP';
+  } else if (effectiveGap < -2.0) {
+    return 'NEGATIVE_GAP';
+  } else if (effectiveGap > 2.0) {
+    return 'STRONG_POSITIVE_GAP';
+  } else {
+    return 'MODERATE_GAP';
+  }
+}
+
+// CORRECT (hierarchical) SENTIMENT LOGIC
+function deriveFinalSentiment({ intraday, swing, longTerm, gapOpenPct, gapNowPct }) {
+  const gapContext = getGapContext(gapOpenPct, gapNowPct);
+
+  // 1️⃣ HARD BLOCKERS
+  if (swing?.sentiment === 'negative' && gapContext !== 'NO_GAP') {
+    return {
+      label: 'Gap Risk - Avoid',
+      sentiment: 'negative',
+      reason: 'Gap risk overrides intraday momentum',
+      icon: '❌'
+    };
+  }
+
+  // 2️⃣ INTRADAY CAN PASS ONLY IF CONTEXT ALLOWS
+  if (
+    intraday?.sentiment === 'positive' &&
+    gapContext !== 'NEGATIVE_GAP'
+  ) {
+    return {
+      label: 'Tradeable',
+      sentiment: 'positive',
+      reason: 'Intraday momentum aligned with gap context',
+      icon: '✅'
+    };
+  }
+
+  // 3️⃣ BREAKOUT EXCEPTION
+  if (
+    intraday?.label === 'Breakout Candidate' &&
+    intraday?.sentiment === 'positive'
+  ) {
+    return {
+      label: 'Breakout Trade',
+      sentiment: 'positive',
+      reason: 'Institutional breakout overrides gap bias',
+      icon: '🚀'
+    };
+  }
+
+  // 4️⃣ DEFAULT
+  return {
+    label: 'No Clear Signal',
+    sentiment: 'neutral',
+    reason: 'Mixed signals – no institutional edge',
+    icon: 'ℹ️'
+  };
+}
 
 
 const router = express.Router();
@@ -110,34 +174,21 @@ const gapData = await fetchGapData(resolvedSymbol)
             : 'neutral';
 
           /* =====================
-             DECISION LOGIC
+             INTRADAY ANALYSIS
           ====================== */
-          const effectiveGap = gapData.gapNowPct ?? gapData.gapOpenPct;
+          const intradayView = evaluateIntraday({
+            rsi,
+            gapOpenPct: gapData.gapOpenPct,
+            gapNowPct: gapData.gapNowPct,
+            volumeSpike: volumeData.volumeSpike,
+            price: gapData.currentPrice,
+            vwap,
+            support,
+            resistance,
+            candleColor,
+            marketCap: gapData.marketCap
+          });
 
-          const isGapped =
-            effectiveGap != null &&
-            Math.abs(effectiveGap) >= gapThreshold;
-
-          const strongConfirmation =
-            volumeData.volumeSpike &&
-            breakout &&
-            gapData.currentPrice > vwap;
-
-          const decision = isGapped
-  ? makeDecision({
-      gapPct: effectiveGap,
-      rsi,
-      rsiCategory,
-      confirmation: strongConfirmation,
-      rsiBias,
-      candleColor
-    })
-  : {
-      label: 'No Gap',
-      sentiment: 'neutral',
-      reason: 'Gap below threshold',
-      icon: 'ℹ️'
-    };
     /* =====================
    SWING & LONG TERM
 ===================== */
@@ -168,6 +219,17 @@ const longTermView = evaluateLongTerm({
     marketPosition
   }
 })
+
+          /* =====================
+             DECISION LOGIC (HIERARCHICAL)
+          ====================== */
+          const decision = deriveFinalSentiment({
+            intraday: intradayView,
+            swing: swingView,
+            longTerm: longTermView,
+            gapOpenPct: gapData.gapOpenPct,
+            gapNowPct: gapData.gapNowPct
+          });
 
 
 
@@ -221,6 +283,7 @@ const longTermView = evaluateLongTerm({
             finalSentiment: decision.sentiment,
             decision,
 
+            intradayView,
             swingView,
             longTermView
           };

@@ -3,6 +3,7 @@ import { fetchGapData, fetchOHLCV, fetchMarketMovers, fastMarketScan } from '../
 import {
   detectVolumeSpike,
   calculateVWAP,
+  calculateIntradayVWAP,
   supportResistance,
   detectBreakout
 } from '../services/technicalIndicators.js';
@@ -90,7 +91,7 @@ router.post('/', async (req, res) => {
              TECHNICALS
           ====================== */
           const volumeData = detectVolumeSpike(candles);
-          const vwap = calculateVWAP(candles);
+          const vwap = calculateIntradayVWAP(candles);
           const { support, resistance } = supportResistance(candles);
 
           const candleColor =
@@ -157,6 +158,7 @@ router.post('/', async (req, res) => {
 
             resolvedSymbol,
             intradayView,
+            finalSentiment: intradayView.sentiment, // Add final sentiment decision
             
             // Entry price information
             entryPrice: entryPriceData.entryPrice,
@@ -176,9 +178,13 @@ router.post('/', async (req, res) => {
       })
     );
 
-    // Filter only positive intraday stocks
+    // Filter only positive intraday stocks (exclude scalp_only entries and poor RR)
     const positiveStocks = results.filter(
-      stock => !stock.error && stock.intradayView && stock.intradayView.sentiment === 'positive'
+      stock => !stock.error && 
+              stock.intradayView && 
+              stock.intradayView.sentiment === 'positive' &&
+              stock.entryType !== 'scalp_only' && // Exclude overextended VWAP entries
+              parseFloat(stock.riskReward) >= 1.0 // Exclude RR < 1:1
     );
 
     // Sort by signal strength (you can customize this logic)

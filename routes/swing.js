@@ -91,7 +91,6 @@ router.post('/', async (req, res) => {
              TECHNICALS
           ====================== */
           const volumeData = detectVolumeSpike(candles);
-          const vwap = calculateVWAP(candles);
           const swingVwap = calculateSwingVWAP(candles, 5); // 5-day VWAP for swing
           const { support, resistance } = supportResistance(candles);
 
@@ -110,7 +109,7 @@ router.post('/', async (req, res) => {
             gapOpenPct: gapData.gapOpenPct,
             volumeSpike: volumeData.volumeSpike,
             price: gapData.currentPrice,
-            vwap: swingVwap, // Use swing VWAP for swing evaluation
+            swingVWAP: swingVwap, // Explicit swing VWAP parameter
             support,
             resistance
           });
@@ -120,7 +119,7 @@ router.post('/', async (req, res) => {
           ====================== */
           const swingEntryPriceData = calculateSwingEntryPrice({
             price: gapData.currentPrice,
-            vwap: swingVwap, // Use swing VWAP for entry price calculation
+            swingVWAP: swingVwap, // Explicit swing VWAP parameter
             support,
             resistance,
             rsi,
@@ -172,8 +171,8 @@ router.post('/', async (req, res) => {
             candleColor,
 
             volume: volumeData,
-            vwap,
-            swingVwap, // Add swing VWAP for debugging
+            vwap: swingVwap, // Use swing VWAP as primary VWAP for swing
+            swingVwap: swingVwap, // Explicit swing VWAP for frontend
             support,
             resistance,
 

@@ -112,9 +112,11 @@ export async function fetchOHLCV(symbol, minPeriods = 60) {
   const result = await yahooChart(norm, { range: '6mo', interval: '1d' });
 
   const q = result?.indicators?.quote?.[0];
+  const t = result?.timestamp; // ✅ FIX: timestamp is at root level, not in indicators
   if (!q) throw new Error(`No OHLC data for ${symbol}`);
 
   const candles = q.close.map((_, i) => ({
+  timestamp: t?.[i] ? new Date(t[i] * 1000).toISOString().slice(0, 10) : null,
   open: q.open[i],
   high: q.high[i],
   low: q.low[i],
@@ -140,7 +142,9 @@ export async function fetchOHLCV(symbol, minPeriods = 60) {
   return candles;
 }
 export async function fetchIndexOHLC(indexName) {
-  const name = indexName.toUpperCase().replace(/\s+/g, '')
+  const name = indexName
+    .toUpperCase()
+    .replace(/[\s\-]/g, '') // ✅ FIX: Handle both spaces and hyphens
 
   // -----------------------
   // NSE INDICES
@@ -153,24 +157,60 @@ export async function fetchIndexOHLC(indexName) {
   }
 
   if (nseMap[name]) {
-    const url = `${NSE_API}/equity-stockIndices?index=${nseMap[name]}`
-    const headers = await getNSEHeaders()
-    const res = await fetch(url, { headers })
+    try {
+      const url = `${NSE_API}/equity-stockIndices?index=${nseMap[name]}`
+      let res = await fetch(url, { headers: await getNSEHeaders() })
 
-    if (!res.ok) throw new Error(`NSE index fetch failed (${res.status})`)
+      if (res.status === 403) {
+        // 🔄 Force cookie refresh ONCE
+        res = await fetch(url, {
+          headers: await getNSEHeaders(true)
+        })
+      }
 
-    const json = await res.json()
-    const d = json?.data?.[0]
-    if (!d) throw new Error(`No NSE index data for ${indexName}`)
+      if (!res.ok) {
+        throw new Error(`NSE index fetch failed (${res.status})`)
+      }
 
-    return {
-      open: d.open,
-      high: d.dayHigh,
-      low: d.dayLow,
-      prevClose: d.previousClose,
-      last: d.lastPrice,
-      changePct: d.pChange,
-      source: 'NSE'
+      const json = await res.json()
+      const d = json?.data?.[0]
+      if (!d) throw new Error(`No NSE index data for ${indexName}`)
+
+      return {
+        open: d.open,
+        high: d.dayHigh,
+        low: d.dayLow,
+        prevClose: d.previousClose,
+        last: d.lastPrice,
+        changePct: d.pChange,
+        source: 'NSE'
+      }
+    } catch (err) {
+      console.warn('NSE index failed, falling back to Yahoo:', err.message)
+
+      const yahooSymbol =
+        name === 'BANKNIFTY' || name === 'NIFTYBANK'
+          ? '^NSEBANK'
+          : '^NSEI'
+
+      const chart = await yahooChart(yahooSymbol, {
+        range: '1d',
+        interval: '5m'
+      })
+
+      const meta = chart.meta
+      const quote = chart.indicators.quote[0]
+      const last = meta.regularMarketPrice
+
+      return {
+        open: meta.chartPreviousClose,
+        high: meta.regularMarketDayHigh,
+        low: meta.regularMarketDayLow,
+        prevClose: meta.previousClose,
+        last,
+        changePct: meta.regularMarketChangePercent,
+        source: 'YAHOO-FALLBACK'
+      }
     }
   }
 
@@ -277,58 +317,79 @@ async function fetchQuote(symbol) {
 ====================== */
 let nseCookie = null;
 let nseCookieTime = 0;
+let nseLock = Promise.resolve(); // 🔒 Mutex lock for NSE calls
+
+async function withNSELock(fn) {
+  const release = nseLock;
+  let unlock;
+  nseLock = new Promise(r => (unlock = r));
+  await release;
+  try {
+    return await fn();
+  } finally {
+    unlock();
+  }
+}
 
 function baseIndianSymbol(symbol) {
   if (!symbol) return symbol;
   return String(symbol).trim().toUpperCase().replace(/\.(NS|BO)$/i, '');
 }
 
-async function getNSEHeaders() {
-  const now = Date.now();
-  const needNew = !nseCookie || now - nseCookieTime > 10 * 60 * 1000;
+async function getNSEHeaders(forceRefresh = false) {
+  const now = Date.now()
+  const needNew = forceRefresh || !nseCookie || now - nseCookieTime > 5 * 60 * 1000
 
   if (needNew) {
     const res = await fetch(NSE_HOME, {
       headers: {
-        'User-Agent': 'Mozilla/5.0',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         Accept: 'text/html',
-      },
-    });
+        'Accept-Language': 'en-IN,en;q=0.9',
+        Connection: 'keep-alive'
+      }
+    })
 
-    const raw = res.headers.raw?.();
-    const cookies = raw?.['set-cookie'];
+    const raw = res.headers.raw?.()
+    const cookies = raw?.['set-cookie']
+
     if (cookies?.length) {
-      nseCookie = cookies.map(c => c.split(';')[0]).join('; ');
-      nseCookieTime = now;
+      nseCookie = cookies.map(c => c.split(';')[0]).join('; ')
+      nseCookieTime = now
     }
   }
 
-  const headers = {
-    'User-Agent': 'Mozilla/5.0',
+  return {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     Accept: 'application/json',
+    'Accept-Language': 'en-IN,en;q=0.9',
     Referer: NSE_HOME + '/',
     'X-Requested-With': 'XMLHttpRequest',
-  };
-
-  if (nseCookie) headers.Cookie = nseCookie;
-  return headers;
+    'sec-fetch-site': 'same-origin',
+    'sec-fetch-mode': 'cors',
+    Connection: 'keep-alive',
+    Cookie: nseCookie
+  }
 }
 
 export async function fetchNSE(path, retries = 1) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const headers = await getNSEHeaders();
-      const res = await fetch(`${NSE_API}${path}`, { headers });
-      if (!res.ok) throw new Error(`NSE request failed (${res.status})`);
-      return res.json();
-    } catch (error) {
-      if (i === retries - 1) throw error;
-      // Force cookie refresh on retry
-      nseCookie = null;
-      nseCookieTime = 0;
-      await new Promise(resolve => setTimeout(resolve, 1000));
+  return withNSELock(async () => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const headers = await getNSEHeaders();
+        const res = await fetch(`${NSE_API}${path}`, { headers });
+        if (!res.ok) throw new Error(`NSE request failed (${res.status})`);
+        return res.json();
+      } catch (error) {
+        if (i === retries - 1) throw error;
+        nseCookie = null;
+        nseCookieTime = 0;
+        await new Promise(r => setTimeout(r, 800));
+      }
     }
-  }
+  });
 }
 
 async function fetchNSEQuote(symbolBase) {

@@ -14,25 +14,34 @@ export function evaluateSwing({
   gapOpenPct,
   volumeSpike,
   price,
-  vwap,
+  swingVWAP,
   support,
   resistance
 }) {
+  // 🛡️ DEFENSIVE GUARD: Check swingVWAP availability
+  if (!swingVWAP || !isFinite(swingVWAP)) {
+    return {
+      label: 'Insufficient Structure Data',
+      sentiment: 'neutral',
+      reasons: ['Swing VWAP unavailable']
+    }
+  }
+
   const reasons = []
 
-  const aboveVWAP = price > vwap
-  const nearResistance = resistance && price >= resistance * 0.98 && rsi > 55 // Improved filter - avoid early breakout calls
+  const aboveStructure = price > swingVWAP
+  const breakoutConfirmed = getBreakoutConfirmation(resistance, price, volumeSpike)
   const nearSupport = support && price <= support * 1.05
-  const volumeOK = volumeSpike || (price > vwap && rsi > 50)
+  const volumeOK = volumeSpike || (price > swingVWAP && rsi > 50)
 
   // Gap segregation - eliminate event-driven volatility
-  const isGapDay = Math.abs(gapOpenPct) >= 1.2
+  const isLargeGap = Math.abs(gapOpenPct) >= 2.0
 
-  if (isGapDay && !volumeSpike) {
+  if (isLargeGap && !volumeSpike) {
     return {
-      label: 'Gap Day – Avoid Swing',
+      label: 'Large Gap – Avoid Swing',
       sentiment: 'negative',
-      reasons: ['Gap-driven volatility unsuitable for swing trades']
+      reasons: ['Large event-driven gap without volume confirmation']
     }
   }
 
@@ -44,11 +53,11 @@ export function evaluateSwing({
     rsi <= 65 &&
     Math.abs(gapOpenPct) <= 2.0 &&
     volumeOK &&
-    aboveVWAP &&
-    !nearResistance
+    aboveStructure &&
+    !breakoutConfirmed
   ) {
     reasons.push('Momentum in favorable RSI zone')
-    reasons.push('Price above VWAP indicates bullish structure')
+    reasons.push('Price above swing VWAP indicates bullish structure')
     reasons.push(volumeSpike ? 'Volume confirms participation' : 'Building momentum')
 
     return {
@@ -65,10 +74,10 @@ export function evaluateSwing({
     rsi >= 35 &&
     rsi < 50 &&
     volumeOK &&
-    !nearResistance
+    !breakoutConfirmed
   ) {
     reasons.push('Early momentum emerging')
-    reasons.push(aboveVWAP ? 'Price above VWAP is bullish' : 'Building base below VWAP')
+    reasons.push(aboveStructure ? 'Price above swing VWAP is bullish' : 'Building base below swing VWAP')
     reasons.push(volumeSpike ? 'Volume pickup suggests accumulation' : 'Watch for volume confirmation')
 
     return {
@@ -85,7 +94,7 @@ export function evaluateSwing({
     rsi >= 30 &&
     rsi <= 55 &&
     nearSupport &&
-    (aboveVWAP || volumeSpike)
+    (aboveStructure || volumeSpike)
   ) {
     reasons.push('Price reacting near support zone')
     reasons.push(volumeSpike ? 'Volume confirms institutional interest' : 'Watch for volume confirmation')
@@ -103,12 +112,12 @@ export function evaluateSwing({
   ========================== */
   if (
     rsi >= 45 &&
-    rsi <= 75 &&
-    nearResistance &&
-    volumeOK
+    rsi <= 68 && // 🔧 FIX: Cap RSI lower to avoid distribution tops
+    breakoutConfirmed &&
+    Math.abs(gapOpenPct) <= 2.0 // 🔧 FIX: Add gap filter to avoid chasing tops
   ) {
-    reasons.push('Breaking resistance with momentum')
-    reasons.push(volumeSpike ? 'Volume confirms breakout strength' : 'Watch for volume on breakout')
+    reasons.push('Breaking resistance with volume confirmation')
+    reasons.push('Institutional-grade breakout confirmed')
     reasons.push('High-potential swing setup')
 
     return {
@@ -125,9 +134,8 @@ export function evaluateSwing({
     rsi >= 40 &&
     rsi <= 60 &&
     Math.abs(gapOpenPct) <= 1.0 &&
-    !nearResistance &&
-    !nearSupport &&
-    volumeOK
+    !breakoutConfirmed &&
+    !nearSupport
   ) {
     reasons.push('Stock in consolidation phase')
     reasons.push('Awaiting breakout direction')
@@ -245,6 +253,16 @@ export function evaluateSwing({
 //   }
 // }
 import { evaluateFundamentals } from './fundamentalAnalyzer.js'
+import { calculateIntradayVWAP, calculateSwingVWAP } from './technicalIndicators.js'
+
+// TRUE BREAKOUT CONFIRMATION LOGIC
+function getBreakoutConfirmation(resistance, price, volumeSpike) {
+  return (
+    resistance &&
+    price > resistance * 1.002 && // acceptance - 0.2% above resistance
+    volumeSpike // must have volume confirmation
+  );
+}
 
 export function evaluateLongTerm({ rsi, marketCap, fundamentals }) {
   if (!marketCap || !fundamentals) {
@@ -322,7 +340,7 @@ if (rsi > 65 && score >= 4) {
  */
 export function calculateSwingEntryPrice({
   price,
-  vwap,
+  swingVWAP, // Explicit swing VWAP parameter
   support,
   resistance,
   rsi,
@@ -337,41 +355,41 @@ export function calculateSwingEntryPrice({
   // Calculate nearest valid levels BELOW price for swing (institutional safety fix)
   const buffer = 0.002; // 0.2% buffer for swing execution
   const nearestBelowPrice = Math.max(
-    vwap && vwap < price ? vwap : 0, // Only VWAP if below current price
+    swingVWAP && swingVWAP < price ? swingVWAP : 0, // Only swing VWAP if below current price
     support && support < price ? support : 0 // Only support if below current price
   ); // CRITICAL: Never enter above structure unintentionally
   
   // Strategy 1: SWING VWAP LEVEL - Enter at VWAP with buffer (swing favorite)
-  if (price > vwap && rsi >= 50 && rsi <= 75 && volumeSpike) {
-    entryPrice = vwap + (vwap * buffer); // VWAP level + small buffer
+  if (price > swingVWAP && rsi >= 50 && rsi <= 75) {
+    entryPrice = Math.min(swingVWAP * 1.015, price); // Enter at 1.5% above swing VWAP or current price, whichever is lower
     entryReason = 'Swing VWAP level - institutional trend following';
     entryType = 'swing_vwap';
   }
   
   // Strategy 2: SWING SUPPORT LEVEL - Enter at support with buffer (AMC accumulation)
   else if (support && price <= support * 1.03 && rsi >= 35 && rsi <= 60) {
-    entryPrice = support + (support * buffer); // Support level + buffer
+    entryPrice = Math.min(support + (support * buffer), price); // Support level + buffer, but never above current price
     entryReason = 'Swing support level - AMC accumulation zone';
     entryType = 'swing_support';
   }
   
   // Strategy 3: SWING BREAKOUT - Enter at resistance breakout with buffer
-  else if (resistance && price >= resistance * 0.98 && volumeSpike && rsi >= 55) {
-    entryPrice = resistance + (resistance * buffer); // Resistance breakout + buffer
+  else if (resistance && price >= resistance * 0.98 && rsi >= 55 && resistance <= price) {
+    entryPrice = Math.min(resistance + (resistance * buffer), price); // Resistance breakout + buffer, but never above current price
     entryReason = 'Swing breakout - institutional momentum entry';
     entryType = 'swing_breakout';
   }
   
   // Strategy 4: SWING CONSOLIDATION - Enter after consolidation break
   else if (rsi >= 45 && rsi <= 65 && Math.abs(gapOpenPct) <= 1.0) {
-    entryPrice = price + (price * buffer); // Current level + buffer
+    entryPrice = price; // Current level (no buffer to stay at or below current price)
     entryReason = 'Swing consolidation breakout - position building';
     entryType = 'swing_consolidation';
   }
   
   // Strategy 5: SWING MOMENTUM - Enter on momentum with volume confirmation
-  else if (volumeSpike && rsi >= 50 && rsi <= 70 && candleColor === 'green') {
-    entryPrice = Math.max(nearestBelowPrice, price * 0.998) + buffer; // Best level + buffer
+  else if (rsi >= 50 && rsi <= 70 && candleColor === 'green') {
+    entryPrice = Math.min(Math.max(nearestBelowPrice, price * 0.998) + buffer, price); // Best level + buffer, but never above current price
     entryReason = 'Swing momentum - volume confirmed position';
     entryType = 'swing_momentum';
   }
@@ -390,13 +408,13 @@ export function calculateSwingEntryPrice({
   let stopLoss;
   
   // Check if structural levels are within reasonable distance for swing
-  const vwapDistance = vwap ? Math.abs(entryPrice - vwap) / entryPrice : 1;
+  const swingVwapDistance = swingVWAP ? Math.abs(entryPrice - swingVWAP) / entryPrice : 1;
   const supportDistance = support ? Math.abs(entryPrice - support) / entryPrice : 1;
   
   // Use structure only if within 3% of entry for swing (wider than intraday)
-  if (vwapDistance <= 0.03 && vwap) {
+  if (swingVwapDistance <= 0.03 && swingVWAP) {
     // VWAP is close - use VWAP-based stop
-    stopLoss = Math.min(vwap * 0.99, entryPrice * 0.97); // 1% below VWAP, 3% max
+    stopLoss = Math.min(swingVWAP * 0.99, entryPrice * 0.97); // 1% below VWAP, 3% max
   } else if (supportDistance <= 0.03 && support) {
     // Support is close - use support-based stop
     stopLoss = Math.min(support * 1.01, entryPrice * 0.97); // 1% below support, 3% max
@@ -461,6 +479,11 @@ export function calculateSwingEntryPrice({
     target2 = target1 * 1.05; // Minimum 5% above target1 for swing
   }
   
+  // 🏦 INSTITUTIONAL RULE: Avoid fake precision on market orders
+  if (entryType !== 'swing_breakout' && entryPrice === price) {
+    entryReason += ' (Limit preferred, wait for pullback)';
+  }
+  
   return {
     entryPrice,
     stopLoss: Math.round(stopLoss * 100) / 100,
@@ -492,6 +515,19 @@ export function calculateIntradayEntryPrice({
   let entryReason = '';
   let entryType = 'current';
   
+  // 🛡️ OVEREXTENDED VWAP GUARD - Institutional Risk Management
+  const vwapExtension = (price - vwap) / vwap;
+  if (vwapExtension > 0.045 && !volumeSpike) {
+    return {
+      entryPrice: price,
+      entryReason: 'Stretch Zone – Scalp Only (Overextended VWAP)',
+      entryType: 'scalp_only',
+      riskLevel: 'high',
+      positionSize: 'reduce',
+      targetAdjustment: 'tighten_to_1.5_2_percent'
+    };
+  }
+  
   // Calculate nearest valid levels BELOW price (institutional safety fix)
   const buffer = 0.001; // 0.1% buffer for execution
   const nearestBelowPrice = Math.max(
@@ -500,53 +536,57 @@ export function calculateIntradayEntryPrice({
   ); // CRITICAL: Never enter above structure unintentionally
   
   // Strategy 1: DUAL-MODE VWAP - Pullback vs Trend Continuation (institutional fix)
-  if (price > vwap && rsi >= 45 && rsi <= 80 && volumeSpike) {
-    if (price <= vwap * 1.003) {
+  if (price > vwap && rsi >= 45 && rsi <= 80) {
+    const vwapDistance = (price - vwap) / vwap;
+    
+    if (price <= vwap * 1.02) {
       // Price is near VWAP - enter at VWAP pullback
-      entryPrice = vwap + (vwap * buffer); // VWAP level + small buffer
-      entryReason = 'VWAP pullback entry - institutional retest';
+      entryPrice = Math.min(vwap + (vwap * buffer), price); // VWAP level + small buffer, but never above current price
+      entryReason = `VWAP pullback entry - ${(vwapDistance * 100).toFixed(1)}% above VWAP`;
       entryType = 'vwap_pullback';
     } else {
       // Price is far from VWAP - trend continuation entry
       entryPrice = price; // Enter at current price (trend continuation)
-      entryReason = 'Trend continuation entry - momentum play';
+      entryReason = `Trend continuation - ${(vwapDistance * 100).toFixed(1)}% above VWAP`;
       entryType = 'trend_continuation';
     }
   }
   
   // Strategy 2: SUPPORT LEVEL - Enter at support with buffer (AMC style)
   else if (support && price <= support * 1.02 && rsi >= 35 && rsi <= 60) {
-    entryPrice = support + (support * buffer); // Support level + small buffer
-    entryReason = 'Support level entry - AMC accumulation zone';
+    const supportDistance = ((price - support) / support * 100).toFixed(1);
+    entryPrice = Math.min(support + (support * buffer), price); // Support level + small buffer, but never above current price
+    entryReason = `Support level entry - ${supportDistance}% above support`;
     entryType = 'support_level';
   }
   
   // Strategy 3: RESISTANCE BREAKOUT - Enter at breakout level with buffer
-  else if (resistance && price >= resistance * 0.995 && volumeSpike) {
-    entryPrice = resistance + (resistance * buffer); // Resistance level + buffer
-    entryReason = 'Resistance breakout - institutional entry';
+  else if (resistance && price >= resistance * 0.995 && resistance <= price) {
+    const breakoutDistance = ((price - resistance) / resistance * 100).toFixed(1);
+    entryPrice = Math.min(resistance + (resistance * buffer), price); // Resistance level + buffer, but never above current price
+    entryReason = `Resistance breakout - ${breakoutDistance}% above resistance`;
     entryType = 'resistance_breakout';
   }
   
   // Strategy 4: OPENING RANGE BREAKOUT - Enter at ORB high with buffer
   else if (gapOpenPct > 1.0 && gapOpenPct < 5.0 && candleColor === 'green') {
     const orbHigh = price * 1.01; // Approximate ORB high
-    entryPrice = orbHigh + (orbHigh * buffer); // ORB level + buffer
-    entryReason = 'Opening range breakout - gap momentum';
+    entryPrice = Math.min(orbHigh + (orbHigh * buffer), price); // ORB level + buffer, but never above current price
+    entryReason = `ORB breakout - ${gapOpenPct.toFixed(1)}% gap momentum`;
     entryType = 'orb_breakout';
   }
   
   // Strategy 5: CONSOLIDATION LEVEL - Enter at consolidation breakout
   else if (rsi >= 45 && rsi <= 65 && Math.abs(gapOpenPct) <= 0.5) {
-    entryPrice = price + (price * buffer); // Current level + buffer
-    entryReason = 'Consolidation breakout - level entry';
+    entryPrice = price; // Current level (no buffer to stay at or below current price)
+    entryReason = `Consolidation breakout - RSI ${rsi.toFixed(1)} zone`;
     entryType = 'consolidation_level';
   }
   
   // Strategy 6: VOLUME CONFIRMED LEVEL - Enter at volume-confirmed level
-  else if (volumeSpike && rsi >= 50 && rsi <= 70) {
-    entryPrice = Math.max(nearestBelowPrice, price * 0.999) + buffer; // Best level + buffer
-    entryReason = 'Volume confirmed level - institutional entry';
+  else if (rsi >= 50 && rsi <= 70) {
+    entryPrice = Math.min(Math.max(nearestBelowPrice, price * 0.999) + buffer, price); // Best level + buffer, but never above current price
+    entryReason = `Volume confirmed - RSI ${rsi.toFixed(1)} with volume`;
     entryType = 'volume_confirmed_level';
   }
   
@@ -655,6 +695,19 @@ export function calculateIntradayEntryPrice({
     target2 = target1 * 1.015; // Minimum 1.5% above target1
   }
   
+  // 🛡️ INSTITUTIONAL GUARD: Check RR before returning
+  if ((target1 - entryPrice) < (entryPrice - stopLoss)) {
+    return {
+      entryPrice,
+      stopLoss: Math.round(stopLoss * 100) / 100,
+      target1: Math.round(target1 * 100) / 100,
+      target2: Math.round(target2 * 100) / 100,
+      entryReason: entryReason + ' (RR weak – wait for better location)',
+      entryType: 'rr_weak',
+      riskReward: ((target1 - entryPrice) / (entryPrice - stopLoss)).toFixed(2)
+    }
+  }
+  
   return {
     entryPrice,
     stopLoss: Math.round(stopLoss * 100) / 100,
@@ -693,7 +746,7 @@ export function evaluateIntraday({
   
   const aboveVWAP = price > vwap
   const belowVWAP = price < vwap
-  const nearResistance = resistance && price >= resistance * 0.98
+  const breakoutConfirmed = getBreakoutConfirmation(resistance, price, volumeSpike)
   const nearSupport = support && price <= support * 1.02
   const effectiveGap = gapNowPct || gapOpenPct
   const volumeOK = volumeSpike || (price > vwap && rsi > 50)
@@ -727,16 +780,16 @@ export function evaluateIntraday({
   ========================== */
   if (
     rsi >= 40 &&
-    rsi <= 75 &&
+    rsi <= 65 &&
     effectiveGap >= 0.2 &&
     effectiveGap < 3.5 &&
     volumeOK &&
     aboveVWAP &&
-    !nearResistance
+    !breakoutConfirmed
   ) {
     reasons.push(effectiveGap > 0.5 ? 'Gap up with momentum' : 'Positive price action')
     reasons.push('Price above VWAP shows bullish structure')
-    reasons.push('RSI in favorable intraday range')
+    reasons.push('RSI in optimal intraday zone')
     reasons.push(candleColor === 'green' ? 'Green candle confirms buying pressure' : 'Building momentum')
 
     return {
@@ -751,7 +804,7 @@ export function evaluateIntraday({
   ========================== */
   if (
     rsi >= 45 &&
-    rsi <= 70 &&
+    rsi <= 65 &&
     aboveVWAP &&
     effectiveGap >= -0.2
   ) {
@@ -768,16 +821,35 @@ export function evaluateIntraday({
   }
 
   /* =========================
+     2️⃣ STRETCH ZONE (VOLUME ONLY)
+  ========================== */
+  if (
+    rsi > 65 &&
+    rsi <= 70 &&
+    volumeSpike &&
+    aboveVWAP
+  ) {
+    reasons.push('Momentum in stretch zone - volume required')
+    reasons.push('Trading above VWAP with volume confirmation')
+    reasons.push('Suitable for scalp/quick trades only')
+
+    return {
+      label: 'Stretch Zone - Scalp Only',
+      sentiment: 'positive',
+      reasons
+    }
+  }
+
+  /* =========================
      3️⃣ BREAKOUT PLAY
   ========================== */
   if (
-    nearResistance &&
-    volumeOK &&
+    breakoutConfirmed &&
     rsi >= 50 &&
-    rsi <= 80
+    rsi <= 70
   ) {
-    reasons.push('Near resistance with breakout potential')
-    reasons.push(volumeSpike ? 'Volume indicates institutional interest' : 'Watch for volume on breakout')
+    reasons.push('Institutional-grade breakout confirmed')
+    reasons.push('Volume confirms resistance break')
     reasons.push(candleColor === 'green' ? 'Bullish momentum toward resistance' : 'Consolidating before breakout')
 
     return {
@@ -814,7 +886,7 @@ export function evaluateIntraday({
     rsi >= 40 &&
     rsi <= 60 &&
     Math.abs(effectiveGap) <= 0.5 &&
-    !nearResistance &&
+    !breakoutConfirmed &&
     !nearSupport
   ) {
     reasons.push('Consolidation phase - watch for breakout')
@@ -829,15 +901,16 @@ export function evaluateIntraday({
   }
 
   /* =========================
-     6️⃣ AVOID - OVERBOUGHT
+     6️⃣ AVOID - OVERBOUGHT/DISTRIBUTION
   ========================== */
-  if (rsi > 75) {
-    reasons.push('RSI extremely overbought (>75)')
+  if (rsi > 70) {
+    reasons.push('RSI in distribution zone (>70) - institutions selling')
     reasons.push('High risk of reversal or profit booking')
-    reasons.push('Unfavorable risk-reward for fresh entry')
+    reasons.push('Unfavorable risk-reward for fresh entries')
+    reasons.push('Avoid fresh entries - scalp only if experienced')
 
     return {
-      label: 'Overbought - Avoid',
+      label: 'Overbought - Avoid Fresh Entry',
       sentiment: 'negative',
       reasons
     }

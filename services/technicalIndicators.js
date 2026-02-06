@@ -23,9 +23,30 @@ export function calculateVWAP(candles) {
   return vol === 0 ? null : +(pv / vol).toFixed(2);
 }
 
+export function calculateIntradayVWAP(candles) {
+  let pv = 0, vol = 0;
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Filter for today's candles
+  const todayCandles = candles.filter(c => c.timestamp?.startsWith(today));
+  
+  // If no today's candles, use last few candles as fallback
+  const candlesToUse = todayCandles.length > 0 ? todayCandles : candles.slice(-5);
+
+  for (const c of candlesToUse) {
+    const tp = (c.high + c.low + c.close) / 3;
+    pv += tp * c.volume;
+    vol += c.volume;
+  }
+
+  return vol === 0 ? null : +(pv / vol).toFixed(2);
+}
+
 export function calculateSwingVWAP(candles, days = 5) {
   // Calculate 5-day VWAP for swing trading (institutional approach)
-  const swingCandles = candles.slice(-(days * 20)); // Approx 5 trading days
+  // For daily data, we only need 'days' number of candles, not days * 20
+  const swingCandles = candles.slice(-days); // Take last 5 daily candles
   let pv = 0;
   let vol = 0;
 
