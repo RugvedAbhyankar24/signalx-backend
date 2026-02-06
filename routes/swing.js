@@ -13,6 +13,120 @@ import { resolveNSESymbol } from '../services/marketData.js';
 
 const router = express.Router();
 
+// 🗄️ Background scan cache
+let swingCache = {
+  status: 'idle',
+  results: [],
+  updatedAt: null,
+  error: null
+};
+
+// 🚀 Background worker with concurrency control
+async function mapWithConcurrency(items, concurrency, fn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += concurrency) {
+    const batch = items.slice(i, i + concurrency);
+    const batchResults = await Promise.all(
+      batch.map(item => fn(item).catch(err => ({ error: err.message, item })))
+    );
+    results.push(...batchResults);
+  }
+  return results;
+}
+
+// 📊 Deep scan single symbol for swing
+async function deepScanSwingSymbol(symbol) {
+  try {
+    const normalized = normalizeIndian(symbol);
+    if (isLikelyInvalidSymbol(symbol)) {
+      return { symbol, error: 'Invalid NSE symbol' };
+    }
+
+    const resolvedSymbol = await resolveNSESymbol(symbol);
+    const gapData = await fetchGapData(resolvedSymbol);
+    const candles = await fetchOHLCV(resolvedSymbol, Math.max(60, 14 + 20));
+    const closes = candles.map(c => c.close);
+    const lastCandle = candles[candles.length - 1];
+    const rsi = computeRSI(closes, 14);
+    
+    const volumeData = detectVolumeSpike(candles);
+    const swingVwap = calculateSwingVWAP(candles, 5);
+    const { support, resistance } = supportResistance(candles);
+    
+    const candleColor = lastCandle.close > lastCandle.open ? 'green' : 
+                       lastCandle.close < lastCandle.open ? 'red' : 'neutral';
+
+    const swingView = evaluateSwing({
+      rsi, gapOpenPct: gapData.gapOpenPct, volumeSpike: volumeData.volumeSpike,
+      price: gapData.currentPrice, swingVWAP: swingVwap, support, resistance
+    });
+
+    const swingEntryPriceData = calculateSwingEntryPrice({
+      price: gapData.currentPrice, swingVWAP: swingVwap, support, resistance, rsi,
+      candleColor, gapOpenPct: gapData.gapOpenPct, volumeSpike: volumeData.volumeSpike
+    });
+
+    return {
+      symbol, normalizedSymbol: normalized, companyName: gapData.companyName || symbol,
+      gapOpenPct: gapData.gapOpenPct, gapNowPct: gapData.gapNowPct,
+      prevClose: gapData.prevClose, open: gapData.open, currentPrice: gapData.currentPrice,
+      marketCap: gapData.marketCap, priceSource: gapData.priceSource, rsi, candleColor,
+      volume: volumeData, vwap: swingVwap, swingVwap: swingVwap, support, resistance,
+      resolvedSymbol, swingView, finalSentiment: swingView.sentiment,
+      entryPrice: swingEntryPriceData.entryPrice, stopLoss: swingEntryPriceData.stopLoss,
+      target1: swingEntryPriceData.target1, target2: swingEntryPriceData.target2,
+      entryReason: swingEntryPriceData.entryReason, entryType: swingEntryPriceData.entryType,
+      riskReward: swingEntryPriceData.riskReward
+    };
+  } catch (e) {
+    return { symbol, error: e.message || 'Failed to process symbol' };
+  }
+}
+
+// 🔥 Background scan worker for swing
+async function startSwingBackgroundScan() {
+  if (swingCache.status === 'running') return;
+
+  console.log('🚀 Starting background swing scan...');
+  swingCache.status = 'running';
+  swingCache.error = null;
+
+  try {
+    const fast50 = await fastMarketScan(); // Get top 50 stocks
+    console.log(`📊 Background scanning ${fast50.length} symbols for swing...`);
+
+    const results = await mapWithConcurrency(
+      fast50.slice(0, 50),
+      3, // Process 3 symbols at a time
+      async (symbol) => deepScanSwingSymbol(symbol)
+    );
+
+    swingCache.results = results.filter(r => 
+      !r.error && r.swingView?.sentiment === 'positive' &&
+      r.entryType !== 'rr_weak' && parseFloat(r.riskReward) >= 1.0
+    );
+
+    swingCache.status = 'done';
+    swingCache.updatedAt = Date.now();
+    console.log(`✅ Background swing scan completed: ${swingCache.results.length} positive stocks`);
+  } catch (error) {
+    console.error('❌ Background swing scan error:', error);
+    swingCache.status = 'error';
+    swingCache.error = error.message;
+  }
+}
+
+// 📡 POST /scan/swing/start - Start background scan
+router.post('/start', async (req, res) => {
+  startSwingBackgroundScan(); // fire & forget
+  res.json({ status: 'scan_started' });
+});
+
+// 📡 GET /scan/swing/status - Get cached results
+router.get('/status', (req, res) => {
+  res.json(swingCache);
+});
+
 function normalizeIndian(symbol) {
   if (!symbol) return symbol;
   const s = String(symbol).trim().toUpperCase();

@@ -13,6 +13,121 @@ import { resolveNSESymbol } from '../services/marketData.js';
 
 const router = express.Router();
 
+// 🗄️ Background scan cache
+let intradayCache = {
+  status: 'idle',
+  results: [],
+  updatedAt: null,
+  error: null
+};
+
+// 🚀 Background worker with concurrency control
+async function mapWithConcurrency(items, concurrency, fn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += concurrency) {
+    const batch = items.slice(i, i + concurrency);
+    const batchResults = await Promise.all(
+      batch.map(item => fn(item).catch(err => ({ error: err.message, item })))
+    );
+    results.push(...batchResults);
+  }
+  return results;
+}
+
+// 📊 Deep scan single symbol
+async function deepScanSymbol(symbol) {
+  try {
+    const normalized = normalizeIndian(symbol);
+    if (isLikelyInvalidSymbol(symbol)) {
+      return { symbol, error: 'Invalid NSE symbol' };
+    }
+
+    const resolvedSymbol = await resolveNSESymbol(symbol);
+    const gapData = await fetchGapData(resolvedSymbol);
+    const candles = await fetchOHLCV(resolvedSymbol, Math.max(60, 14 + 20));
+    const closes = candles.map(c => c.close);
+    const lastCandle = candles[candles.length - 1];
+    const rsi = computeRSI(closes, 14);
+    
+    const volumeData = detectVolumeSpike(candles);
+    const vwap = calculateIntradayVWAP(candles);
+    const { support, resistance } = supportResistance(candles);
+    
+    const candleColor = lastCandle.close > lastCandle.open ? 'green' : 
+                       lastCandle.close < lastCandle.open ? 'red' : 'neutral';
+
+    const intradayView = evaluateIntraday({
+      rsi, gapOpenPct: gapData.gapOpenPct, gapNowPct: gapData.gapNowPct,
+      volumeSpike: volumeData.volumeSpike, price: gapData.currentPrice,
+      vwap, support, resistance, candleColor, marketCap: gapData.marketCap
+    });
+
+    const entryPriceData = calculateIntradayEntryPrice({
+      price: gapData.currentPrice, vwap, support, resistance, rsi,
+      candleColor, gapOpenPct: gapData.gapOpenPct, volumeSpike: volumeData.volumeSpike
+    });
+
+    return {
+      symbol, normalizedSymbol: normalized, companyName: gapData.companyName || symbol,
+      gapOpenPct: gapData.gapOpenPct, gapNowPct: gapData.gapNowPct,
+      prevClose: gapData.prevClose, open: gapData.open, currentPrice: gapData.currentPrice,
+      marketCap: gapData.marketCap, priceSource: gapData.priceSource, rsi, candleColor,
+      volume: volumeData, vwap, support, resistance, resolvedSymbol, intradayView,
+      finalSentiment: intradayView.sentiment,
+      entryPrice: entryPriceData.entryPrice, stopLoss: entryPriceData.stopLoss,
+      target1: entryPriceData.target1, target2: entryPriceData.target2,
+      entryReason: entryPriceData.entryReason, entryType: entryPriceData.entryType,
+      riskReward: entryPriceData.riskReward
+    };
+  } catch (e) {
+    return { symbol, error: e.message || 'Failed to process symbol' };
+  }
+}
+
+// 🔥 Background scan worker
+async function startIntradayBackgroundScan() {
+  if (intradayCache.status === 'running') return;
+
+  console.log('🚀 Starting background intraday scan...');
+  intradayCache.status = 'running';
+  intradayCache.error = null;
+
+  try {
+    const fast50 = await fastMarketScan(); // Get top 50 stocks
+    console.log(`📊 Background scanning ${fast50.length} symbols...`);
+
+    const results = await mapWithConcurrency(
+      fast50.slice(0, 50),
+      3, // Process 3 symbols at a time
+      async (symbol) => deepScanSymbol(symbol)
+    );
+
+    intradayCache.results = results.filter(r => 
+      !r.error && r.intradayView?.sentiment === 'positive' &&
+      r.entryType !== 'scalp_only' && parseFloat(r.riskReward) >= 1.0
+    );
+
+    intradayCache.status = 'done';
+    intradayCache.updatedAt = Date.now();
+    console.log(`✅ Background scan completed: ${intradayCache.results.length} positive stocks`);
+  } catch (error) {
+    console.error('❌ Background scan error:', error);
+    intradayCache.status = 'error';
+    intradayCache.error = error.message;
+  }
+}
+
+// 📡 POST /scan/intraday/start - Start background scan
+router.post('/start', async (req, res) => {
+  startIntradayBackgroundScan(); // fire & forget
+  res.json({ status: 'scan_started' });
+});
+
+// 📡 GET /scan/intraday/status - Get cached results
+router.get('/status', (req, res) => {
+  res.json(intradayCache);
+});
+
 function normalizeIndian(symbol) {
   if (!symbol) return symbol;
   const s = String(symbol).trim().toUpperCase();
