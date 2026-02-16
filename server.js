@@ -11,8 +11,31 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const DEFAULT_ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000'
+];
 
-app.use(cors());
+const configuredOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+const allowedOrigins = configuredOrigins.length ? configuredOrigins : DEFAULT_ALLOWED_ORIGINS;
+
+const corsOptions = {
+  origin(origin, callback) {
+    // Allow non-browser requests (curl/postman/server-to-server)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Origin not allowed by CORS'));
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 app.get('/', (req, res) => {
@@ -27,6 +50,9 @@ app.use('/api/intraday', intradayRouter);
 app.use('/api/swing', swingRouter);
 
 app.use((err, req, res, next) => {
+  if (err?.message === 'Origin not allowed by CORS') {
+    return res.status(403).json({ error: 'Forbidden origin' });
+  }
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal Server Error' });
 });

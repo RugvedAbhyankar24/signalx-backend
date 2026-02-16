@@ -10,6 +10,7 @@ import {
 import { computeRSI } from '../services/rsiCalculator.js';
 import { evaluateIntraday, calculateIntradayEntryPrice } from '../services/positionEvaluator.js';
 import { resolveNSESymbol } from '../services/marketData.js';
+import { createRateLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
 const compliance = {
@@ -34,6 +35,18 @@ const NSE_HOLIDAYS = new Set(
     .map(s => s.trim())
     .filter(Boolean)
 );
+const intradayStartLimiter = createRateLimiter({
+  windowMs: Number(process.env.INTRADAY_START_RATE_LIMIT_WINDOW_MS || 60_000),
+  max: Number(process.env.INTRADAY_START_RATE_LIMIT_MAX || 6),
+  keyFn: (req) => `${req.ip}:intraday:start`,
+  message: 'Too many intraday start requests.'
+});
+const intradayScanLimiter = createRateLimiter({
+  windowMs: Number(process.env.INTRADAY_SCAN_RATE_LIMIT_WINDOW_MS || 60_000),
+  max: Number(process.env.INTRADAY_SCAN_RATE_LIMIT_MAX || 12),
+  keyFn: (req) => `${req.ip}:intraday:scan`,
+  message: 'Too many intraday scan requests.'
+});
 
 // 🗄️ Background scan cache
 let intradayCache = {
@@ -148,7 +161,7 @@ async function startIntradayBackgroundScan() {
 }
 
 // 📡 POST /scan/intraday/start - Start background scan
-router.post('/start', async (req, res) => {
+router.post('/start', intradayStartLimiter, async (req, res) => {
   const marketState = getIndianMarketState();
   const forceRunWhenClosed = parseBooleanFlag(req.body?.forceRunWhenClosed, false);
   if (!marketState.isOpen && !forceRunWhenClosed) {
@@ -240,7 +253,7 @@ function getIndianMarketState(now = new Date()) {
   };
 }
 
-router.post('/', async (req, res) => {
+router.post('/', intradayScanLimiter, async (req, res) => {
   const {
     symbols,
     rsiPeriod = 14,

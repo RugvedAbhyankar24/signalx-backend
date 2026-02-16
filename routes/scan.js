@@ -16,6 +16,7 @@ import {
   evaluateIntraday
 } from '../services/positionEvaluator.js'
 import { fetchFundamentals } from '../services/marketData.js'
+import { createRateLimiter } from '../middleware/rateLimit.js';
 
 // GAP CONTEXT HELPER
 function getGapContext(gapOpenPct, gapNowPct) {
@@ -89,6 +90,12 @@ const compliance = {
   recommendationType: 'educational-screening',
   riskDisclosure: 'Do not treat this as investment advice. Validate with your own risk checks and a SEBI-registered advisor before any trade.',
 };
+const fullScanLimiter = createRateLimiter({
+  windowMs: Number(process.env.FULL_SCAN_RATE_LIMIT_WINDOW_MS || 60_000),
+  max: Number(process.env.FULL_SCAN_RATE_LIMIT_MAX || 10),
+  keyFn: (req) => `${req.ip}:full:scan`,
+  message: 'Too many full scan requests.'
+});
 
 function normalizeIndian(symbol) {
   if (!symbol) return symbol;
@@ -109,7 +116,7 @@ function sanitizeRSIPeriod(input, fallback = 14) {
   return asInt;
 }
 
-router.post('/', async (req, res) => {
+router.post('/', fullScanLimiter, async (req, res) => {
   const { symbols = [], gapThreshold = 0.8, rsiPeriod = 14 } = req.body || {};
   const effectiveRSIPeriod = sanitizeRSIPeriod(rsiPeriod, 14);
 

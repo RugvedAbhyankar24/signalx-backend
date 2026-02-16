@@ -10,6 +10,7 @@ import {
 import { computeRSI } from '../services/rsiCalculator.js';
 import { evaluateSwing, calculateSwingEntryPrice } from '../services/positionEvaluator.js';
 import { resolveNSESymbol } from '../services/marketData.js';
+import { createRateLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
 const compliance = {
@@ -18,6 +19,18 @@ const compliance = {
   recommendationType: 'educational-screening',
   riskDisclosure: 'Do not treat this as investment advice. Validate with your own risk checks and a SEBI-registered advisor before any trade.',
 };
+const swingStartLimiter = createRateLimiter({
+  windowMs: Number(process.env.SWING_START_RATE_LIMIT_WINDOW_MS || 60_000),
+  max: Number(process.env.SWING_START_RATE_LIMIT_MAX || 6),
+  keyFn: (req) => `${req.ip}:swing:start`,
+  message: 'Too many swing start requests.'
+});
+const swingScanLimiter = createRateLimiter({
+  windowMs: Number(process.env.SWING_SCAN_RATE_LIMIT_WINDOW_MS || 60_000),
+  max: Number(process.env.SWING_SCAN_RATE_LIMIT_MAX || 12),
+  keyFn: (req) => `${req.ip}:swing:scan`,
+  message: 'Too many swing scan requests.'
+});
 
 // 🗄️ Background scan cache
 let swingCache = {
@@ -127,7 +140,7 @@ async function startSwingBackgroundScan() {
 }
 
 // 📡 POST /scan/swing/start - Start background scan
-router.post('/start', async (req, res) => {
+router.post('/start', swingStartLimiter, async (req, res) => {
   startSwingBackgroundScan(); // fire & forget
   res.json({ status: 'scan_started' });
 });
@@ -166,7 +179,7 @@ function sanitizeRSIPeriod(input, fallback = 14) {
   return asInt;
 }
 
-router.post('/', async (req, res) => {
+router.post('/', swingScanLimiter, async (req, res) => {
   const { symbols, rsiPeriod = 14, useTwoStageScan = true } = req.body || {};
   const effectiveRSIPeriod = sanitizeRSIPeriod(rsiPeriod, 14);
 
