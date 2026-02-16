@@ -13,6 +13,14 @@ export function makeDecision({
   const isStrongGapDown = gapPct <= -GAP_STRONG
   const isWeakGap = Math.abs(gapPct) >= GAP_WEAK && Math.abs(gapPct) < GAP_STRONG
 
+  const normalizedCategory = String(rsiCategory || '').toLowerCase()
+  const isOverbought =
+    normalizedCategory === 'overbought' ||
+    (Number.isFinite(rsi) && rsi >= 70)
+  const isOversold =
+    normalizedCategory === 'oversold' ||
+    (Number.isFinite(rsi) && rsi <= 30)
+
 
   /* =====================
      1️⃣ GAP TOO SMALL
@@ -47,7 +55,7 @@ export function makeDecision({
      3️⃣ STRONG GAP UP
   ====================== */
   if (isStrongGapUp) {
-    if (rsiCategory === 'overbought') {
+    if (isOverbought) {
       return {
         label: 'Cautious',
         sentiment: 'neutral',
@@ -77,7 +85,7 @@ export function makeDecision({
      4️⃣ STRONG GAP DOWN
   ====================== */
   if (isStrongGapDown) {
-    if (rsiCategory === 'oversold' && candleColor === 'green') {
+    if (isOversold && candleColor === 'green') {
       return {
         label: 'Cautious',
         sentiment: 'neutral',
@@ -104,6 +112,5 @@ export function makeDecision({
     icon: 'ℹ️',
   }
 }
-
 
 

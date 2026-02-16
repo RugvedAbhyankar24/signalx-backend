@@ -255,6 +255,42 @@ export function evaluateSwing({
 import { evaluateFundamentals } from './fundamentalAnalyzer.js'
 import { calculateIntradayVWAP, calculateSwingVWAP } from './technicalIndicators.js'
 
+const DEFAULT_INTRADAY_ROUND_TRIP_COST_BPS = Number(process.env.INTRADAY_ROUND_TRIP_COST_BPS || 18)
+const DEFAULT_SWING_ROUND_TRIP_COST_BPS = Number(process.env.SWING_ROUND_TRIP_COST_BPS || 30)
+
+function calculateRiskReward(entryPrice, stopLoss, target1) {
+  const risk = entryPrice - stopLoss
+  const reward = target1 - entryPrice
+  if (!Number.isFinite(risk) || !Number.isFinite(reward) || risk <= 0) return null
+  return reward / risk
+}
+
+function applyRoundTripCostModel({ entryPrice, stopLoss, target1, costBps }) {
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return null
+  const rrGross = calculateRiskReward(entryPrice, stopLoss, target1)
+  if (rrGross == null) return null
+
+  const effectiveCostBps = Number.isFinite(costBps) && costBps >= 0 ? costBps : 0
+  const roundTripCostPerShare = entryPrice * (effectiveCostBps / 10000)
+
+  const grossRiskPerShare = Math.max(entryPrice - stopLoss, 0)
+  const grossRewardPerShare = Math.max(target1 - entryPrice, 0)
+  const netRiskPerShare = grossRiskPerShare + roundTripCostPerShare
+  const netRewardPerShare = Math.max(grossRewardPerShare - roundTripCostPerShare, 0)
+  const rrNet = netRiskPerShare > 0 ? netRewardPerShare / netRiskPerShare : null
+
+  return {
+    riskRewardGross: rrGross,
+    riskRewardAfterCosts: rrNet,
+    estimatedRoundTripCostPerShare: roundTripCostPerShare,
+    estimatedRoundTripCostPct: effectiveCostBps / 100
+  }
+}
+
+function formatRatio(value) {
+  return Number.isFinite(value) ? value.toFixed(2) : '0.00'
+}
+
 // TRUE BREAKOUT CONFIRMATION LOGIC
 function getBreakoutConfirmation(resistance, price, volumeSpike) {
   return (
@@ -483,6 +519,15 @@ export function calculateSwingEntryPrice({
   if (entryType !== 'swing_breakout' && entryPrice === price) {
     entryReason += ' (Limit preferred, wait for pullback)';
   }
+
+  const rrStats = applyRoundTripCostModel({
+    entryPrice,
+    stopLoss,
+    target1,
+    costBps: DEFAULT_SWING_ROUND_TRIP_COST_BPS
+  })
+  const rrGross = rrStats?.riskRewardGross ?? calculateRiskReward(entryPrice, stopLoss, target1)
+  const rrNet = rrStats?.riskRewardAfterCosts ?? rrGross
   
   return {
     entryPrice,
@@ -491,7 +536,13 @@ export function calculateSwingEntryPrice({
     target2: Math.round(target2 * 100) / 100,
     entryReason,
     entryType,
-    riskReward: ((target1 - entryPrice) / (entryPrice - stopLoss)).toFixed(2)
+    riskReward: formatRatio(rrNet),
+    riskRewardAfterCosts: formatRatio(rrNet),
+    riskRewardGross: formatRatio(rrGross),
+    estimatedRoundTripCostPerShare: rrStats
+      ? Math.round(rrStats.estimatedRoundTripCostPerShare * 100) / 100
+      : null,
+    estimatedRoundTripCostPct: rrStats?.estimatedRoundTripCostPct ?? null
   };
 }
 
@@ -695,9 +746,18 @@ export function calculateIntradayEntryPrice({
   if (target2 <= target1) {
     target2 = target1 * 1.015; // Minimum 1.5% above target1
   }
+
+  const rrStats = applyRoundTripCostModel({
+    entryPrice,
+    stopLoss,
+    target1,
+    costBps: DEFAULT_INTRADAY_ROUND_TRIP_COST_BPS
+  })
+  const rrGross = rrStats?.riskRewardGross ?? calculateRiskReward(entryPrice, stopLoss, target1)
+  const rrNet = rrStats?.riskRewardAfterCosts ?? rrGross
   
   // 🛡️ INSTITUTIONAL GUARD: Check RR before returning
-  if ((target1 - entryPrice) < (entryPrice - stopLoss)) {
+  if ((rrNet ?? 0) < 1) {
     return {
       entryPrice,
       stopLoss: Math.round(stopLoss * 100) / 100,
@@ -705,7 +765,13 @@ export function calculateIntradayEntryPrice({
       target2: Math.round(target2 * 100) / 100,
       entryReason: entryReason + ' (RR weak – wait for better location)',
       entryType: 'rr_weak',
-      riskReward: ((target1 - entryPrice) / (entryPrice - stopLoss)).toFixed(2)
+      riskReward: formatRatio(rrNet),
+      riskRewardAfterCosts: formatRatio(rrNet),
+      riskRewardGross: formatRatio(rrGross),
+      estimatedRoundTripCostPerShare: rrStats
+        ? Math.round(rrStats.estimatedRoundTripCostPerShare * 100) / 100
+        : null,
+      estimatedRoundTripCostPct: rrStats?.estimatedRoundTripCostPct ?? null
     }
   }
   
@@ -716,7 +782,13 @@ export function calculateIntradayEntryPrice({
     target2: Math.round(target2 * 100) / 100,
     entryReason,
     entryType,
-    riskReward: ((target1 - entryPrice) / (entryPrice - stopLoss)).toFixed(2)
+    riskReward: formatRatio(rrNet),
+    riskRewardAfterCosts: formatRatio(rrNet),
+    riskRewardGross: formatRatio(rrGross),
+    estimatedRoundTripCostPerShare: rrStats
+      ? Math.round(rrStats.estimatedRoundTripCostPerShare * 100) / 100
+      : null,
+    estimatedRoundTripCostPct: rrStats?.estimatedRoundTripCostPct ?? null
   };
 }
 

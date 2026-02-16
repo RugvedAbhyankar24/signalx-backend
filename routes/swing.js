@@ -274,9 +274,9 @@ router.post('/', async (req, res) => {
           /* =====================
              CRITICAL RISK/REWARD VALIDATION
           ====================== */
-          const riskRewardRatio = (swingEntryPriceData.target1 - swingEntryPriceData.entryPrice) / (swingEntryPriceData.entryPrice - swingEntryPriceData.stopLoss);
+          const riskRewardRatio = Number.parseFloat(swingEntryPriceData.riskReward);
           
-          if (riskRewardRatio < 1) {
+          if (!Number.isFinite(riskRewardRatio) || riskRewardRatio < 1) {
             // Institutional rule: Reject trades with RR < 1:1
             return {
               symbol,
@@ -288,7 +288,7 @@ router.post('/', async (req, res) => {
                 sentiment: 'negative',
                 reasons: ['Risk-reward below institutional threshold (1:1)']
               },
-              riskReward: riskRewardRatio.toFixed(2),
+              riskReward: Number.isFinite(riskRewardRatio) ? riskRewardRatio.toFixed(2) : '0.00',
               filtered: true // Mark as filtered out
             };
           }
