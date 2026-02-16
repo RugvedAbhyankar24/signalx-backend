@@ -12,6 +12,12 @@ import { evaluateIntraday, calculateIntradayEntryPrice } from '../services/posit
 import { resolveNSESymbol } from '../services/marketData.js';
 
 const router = express.Router();
+const compliance = {
+  jurisdiction: 'IN',
+  advisoryOnly: true,
+  recommendationType: 'educational-screening',
+  riskDisclosure: 'Do not treat this as investment advice. Validate with your own risk checks and a SEBI-registered advisor before any trade.',
+};
 
 // 🗄️ Background scan cache
 let intradayCache = {
@@ -37,6 +43,10 @@ async function mapWithConcurrency(items, concurrency, fn) {
 // 📊 Deep scan single symbol
 async function deepScanSymbol(symbol) {
   try {
+    const scanSymbol = extractSymbol(symbol);
+    if (!scanSymbol) return { symbol: String(symbol ?? ''), error: 'Invalid NSE symbol' };
+    symbol = scanSymbol;
+
     const normalized = normalizeIndian(symbol);
     if (isLikelyInvalidSymbol(symbol)) {
       return { symbol, error: 'Invalid NSE symbol' };
@@ -44,7 +54,11 @@ async function deepScanSymbol(symbol) {
 
     const resolvedSymbol = await resolveNSESymbol(symbol);
     const gapData = await fetchGapData(resolvedSymbol);
-    const candles = await fetchOHLCV(resolvedSymbol, Math.max(60, 14 + 20));
+    const candles = await fetchOHLCV(
+      resolvedSymbol,
+      Math.max(60, 14 + 20),
+      { interval: '5m', range: '5d' }
+    );
     const closes = candles.map(c => c.close);
     const lastCandle = candles[candles.length - 1];
     const rsi = computeRSI(closes, 14);
@@ -99,7 +113,7 @@ async function startIntradayBackgroundScan() {
     const results = await mapWithConcurrency(
       fast50.slice(0, 50),
       3, // Process 3 symbols at a time
-      async (symbol) => deepScanSymbol(symbol)
+      async (stock) => deepScanSymbol(stock?.symbol ?? stock)
     );
 
     intradayCache.results = results.filter(r => 
@@ -125,7 +139,10 @@ router.post('/start', async (req, res) => {
 
 // 📡 GET /scan/intraday/status - Get cached results
 router.get('/status', (req, res) => {
-  res.json(intradayCache);
+  res.json({
+    ...intradayCache,
+    compliance
+  });
 });
 
 function normalizeIndian(symbol) {
@@ -137,6 +154,12 @@ function normalizeIndian(symbol) {
 
 function isLikelyInvalidSymbol(symbol) {
   return symbol.includes(' ') || symbol.length < 2;
+}
+
+function extractSymbol(input) {
+  if (typeof input === 'string') return input;
+  if (input && typeof input.symbol === 'string') return input.symbol;
+  return '';
 }
 
 router.post('/', async (req, res) => {
@@ -191,7 +214,8 @@ router.post('/', async (req, res) => {
           ====================== */
           const candles = await fetchOHLCV(
             resolvedSymbol,
-            Math.max(60, rsiPeriod + 20)
+            Math.max(60, rsiPeriod + 20),
+            { interval: '5m', range: '5d' }
           );
 
           const closes = candles.map(c => c.close);
@@ -317,6 +341,7 @@ router.post('/', async (req, res) => {
       positiveStocks,
       totalScanned: results.length,
       positiveCount: positiveStocks.length,
+      compliance,
       meta: { 
         rsiPeriod,
         scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',

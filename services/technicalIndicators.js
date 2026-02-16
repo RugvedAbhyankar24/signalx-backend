@@ -1,3 +1,17 @@
+const IST_DATE_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Kolkata',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+function getISTDate(input) {
+  if (!input) return null;
+  const d = input instanceof Date ? input : new Date(input);
+  if (Number.isNaN(d.getTime())) return null;
+  return IST_DATE_FORMATTER.format(d);
+}
+
 export function detectVolumeSpike(candles, lookback = 20, multiplier = 1.5) {
   const vols = candles.slice(-lookback - 1, -1).map(c => c.volume);
   const avgVol = vols.reduce((a, b) => a + b, 0) / vols.length;
@@ -24,12 +38,15 @@ export function calculateVWAP(candles) {
 }
 
 export function calculateIntradayVWAP(candles) {
+  if (!Array.isArray(candles) || candles.length === 0) return null;
   let pv = 0, vol = 0;
 
-  const today = new Date().toISOString().slice(0, 10);
+  const todayIST = IST_DATE_FORMATTER.format(new Date());
 
-  // Filter for today's candles
-  const todayCandles = candles.filter(c => c.timestamp?.startsWith(today));
+  // Filter for today's IST trading session
+  const todayCandles = candles.filter(c =>
+    c.tradeDateIST === todayIST || getISTDate(c.timestamp) === todayIST
+  );
   
   // If no today's candles, use last few candles as fallback
   const candlesToUse = todayCandles.length > 0 ? todayCandles : candles.slice(-5);

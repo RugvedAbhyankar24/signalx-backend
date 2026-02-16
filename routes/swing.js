@@ -12,6 +12,12 @@ import { evaluateSwing, calculateSwingEntryPrice } from '../services/positionEva
 import { resolveNSESymbol } from '../services/marketData.js';
 
 const router = express.Router();
+const compliance = {
+  jurisdiction: 'IN',
+  advisoryOnly: true,
+  recommendationType: 'educational-screening',
+  riskDisclosure: 'Do not treat this as investment advice. Validate with your own risk checks and a SEBI-registered advisor before any trade.',
+};
 
 // 🗄️ Background scan cache
 let swingCache = {
@@ -37,6 +43,10 @@ async function mapWithConcurrency(items, concurrency, fn) {
 // 📊 Deep scan single symbol for swing
 async function deepScanSwingSymbol(symbol) {
   try {
+    const scanSymbol = extractSymbol(symbol);
+    if (!scanSymbol) return { symbol: String(symbol ?? ''), error: 'Invalid NSE symbol' };
+    symbol = scanSymbol;
+
     const normalized = normalizeIndian(symbol);
     if (isLikelyInvalidSymbol(symbol)) {
       return { symbol, error: 'Invalid NSE symbol' };
@@ -98,7 +108,7 @@ async function startSwingBackgroundScan() {
     const results = await mapWithConcurrency(
       fast50.slice(0, 50),
       3, // Process 3 symbols at a time
-      async (symbol) => deepScanSwingSymbol(symbol)
+      async (stock) => deepScanSwingSymbol(stock?.symbol ?? stock)
     );
 
     swingCache.results = results.filter(r => 
@@ -124,7 +134,10 @@ router.post('/start', async (req, res) => {
 
 // 📡 GET /scan/swing/status - Get cached results
 router.get('/status', (req, res) => {
-  res.json(swingCache);
+  res.json({
+    ...swingCache,
+    compliance
+  });
 });
 
 function normalizeIndian(symbol) {
@@ -136,6 +149,12 @@ function normalizeIndian(symbol) {
 
 function isLikelyInvalidSymbol(symbol) {
   return symbol.includes(' ') || symbol.length < 2;
+}
+
+function extractSymbol(input) {
+  if (typeof input === 'string') return input;
+  if (input && typeof input.symbol === 'string') return input.symbol;
+  return '';
 }
 
 router.post('/', async (req, res) => {
@@ -336,6 +355,7 @@ router.post('/', async (req, res) => {
       positiveSwingStocks,
       totalScanned: results.length,
       positiveCount: positiveSwingStocks.length,
+      compliance,
       meta: { 
         rsiPeriod,
         scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',

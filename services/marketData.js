@@ -4,6 +4,12 @@ const YF_BASE = 'https://query1.finance.yahoo.com/v8/finance/chart';
 const YF_QUOTE = 'https://query1.finance.yahoo.com/v7/finance/quote';
 const NSE_HOME = 'https://www.nseindia.com';
 const NSE_API = 'https://www.nseindia.com/api';
+const IST_DATE_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Kolkata',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
 /* =====================
    YAHOO CHART FETCH
 ====================== */
@@ -107,24 +113,35 @@ export async function fetchGapData(symbol) {
 /* =====================
    OHLCV (YAHOO)
 ====================== */
-export async function fetchOHLCV(symbol, minPeriods = 60) {
+function getISTDateFromEpoch(epochSeconds) {
+  return IST_DATE_FORMATTER.format(new Date(epochSeconds * 1000));
+}
+
+export async function fetchOHLCV(symbol, minPeriods = 60, options = {}) {
+  const interval = options.interval || '1d';
+  const range = options.range || (interval === '1d' ? '6mo' : '5d');
   const norm = normalizeIndianSymbol(symbol);
-  const result = await yahooChart(norm, { range: '6mo', interval: '1d' });
+  const result = await yahooChart(norm, { range, interval });
 
   const q = result?.indicators?.quote?.[0];
   const t = result?.timestamp; // ✅ FIX: timestamp is at root level, not in indicators
   if (!q) throw new Error(`No OHLC data for ${symbol}`);
 
   const candles = q.close.map((_, i) => ({
-  timestamp: t?.[i] ? new Date(t[i] * 1000).toISOString().slice(0, 10) : null,
-  open: q.open[i],
-  high: q.high[i],
-  low: q.low[i],
-  close: q.close[i],
-  volume: q.volume[i],
-  isGreen: q.close[i] > q.open[i],
-  isRed: q.close[i] < q.open[i],
-}))
+    timestamp: t?.[i]
+      ? (interval === '1d'
+          ? new Date(t[i] * 1000).toISOString().slice(0, 10)
+          : new Date(t[i] * 1000).toISOString())
+      : null,
+    tradeDateIST: t?.[i] ? getISTDateFromEpoch(t[i]) : null,
+    open: q.open[i],
+    high: q.high[i],
+    low: q.low[i],
+    close: q.close[i],
+    volume: q.volume[i],
+    isGreen: q.close[i] > q.open[i],
+    isRed: q.close[i] < q.open[i],
+  }))
 
     .filter(
       c =>

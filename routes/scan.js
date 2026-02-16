@@ -83,6 +83,12 @@ function deriveFinalSentiment({ intraday, swing, longTerm, gapOpenPct, gapNowPct
 
 
 const router = express.Router();
+const compliance = {
+  jurisdiction: 'IN',
+  advisoryOnly: true,
+  recommendationType: 'educational-screening',
+  riskDisclosure: 'Do not treat this as investment advice. Validate with your own risk checks and a SEBI-registered advisor before any trade.',
+};
 
 function normalizeIndian(symbol) {
   if (!symbol) return symbol;
@@ -296,7 +302,7 @@ const longTermView = evaluateLongTerm({
       })
     );
 
-    res.json({ results, meta: { gapThreshold, rsiPeriod } });
+    res.json({ results, compliance, meta: { gapThreshold, rsiPeriod } });
   } catch (err) {
     console.error('scan error', err);
     res.status(500).json({ error: 'Failed to scan symbols' });
