@@ -157,8 +157,18 @@ function extractSymbol(input) {
   return '';
 }
 
+function sanitizeRSIPeriod(input, fallback = 14) {
+  const parsed = Number(input);
+  if (!Number.isFinite(parsed)) return fallback;
+  const asInt = Math.round(parsed);
+  if (asInt < 2) return 2;
+  if (asInt > 50) return 50;
+  return asInt;
+}
+
 router.post('/', async (req, res) => {
   const { symbols, rsiPeriod = 14, useTwoStageScan = true } = req.body || {};
+  const effectiveRSIPeriod = sanitizeRSIPeriod(rsiPeriod, 14);
 
   try {
     // If no symbols provided, use institutional-grade scanning
@@ -209,7 +219,7 @@ router.post('/', async (req, res) => {
           ====================== */
           const candles = await fetchOHLCV(
             resolvedSymbol,
-            Math.max(60, rsiPeriod + 20)
+            Math.max(60, effectiveRSIPeriod + 20)
           );
 
           const closes = candles.map(c => c.close);
@@ -218,7 +228,7 @@ router.post('/', async (req, res) => {
           /* =====================
              RSI
           ====================== */
-          const rsi = computeRSI(closes, rsiPeriod);
+          const rsi = computeRSI(closes, effectiveRSIPeriod);
 
           /* =====================
              TECHNICALS
@@ -357,7 +367,7 @@ router.post('/', async (req, res) => {
       positiveCount: positiveSwingStocks.length,
       compliance,
       meta: { 
-        rsiPeriod,
+        rsiPeriod: effectiveRSIPeriod,
         scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
         stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
         institutionalFiltering: true,

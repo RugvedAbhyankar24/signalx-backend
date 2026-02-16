@@ -100,8 +100,18 @@ function isLikelyInvalidSymbol(symbol) {
   return symbol.includes(' ') || symbol.length < 2;
 }
 
+function sanitizeRSIPeriod(input, fallback = 14) {
+  const parsed = Number(input);
+  if (!Number.isFinite(parsed)) return fallback;
+  const asInt = Math.round(parsed);
+  if (asInt < 2) return 2;
+  if (asInt > 50) return 50;
+  return asInt;
+}
+
 router.post('/', async (req, res) => {
   const { symbols = [], gapThreshold = 0.8, rsiPeriod = 14 } = req.body || {};
+  const effectiveRSIPeriod = sanitizeRSIPeriod(rsiPeriod, 14);
 
   if (!Array.isArray(symbols) || symbols.length === 0) {
     return res.status(400).json({ error: 'symbols array is required' });
@@ -130,7 +140,7 @@ const gapData = await fetchGapData(resolvedSymbol)
           ====================== */
           const candles = await fetchOHLCV(
             resolvedSymbol,
-            Math.max(60, rsiPeriod + 20)
+            Math.max(60, effectiveRSIPeriod + 20)
           );
 
 
@@ -140,7 +150,7 @@ const gapData = await fetchGapData(resolvedSymbol)
           /* =====================
              RSI
           ====================== */
-          const rsi = computeRSI(closes, rsiPeriod);
+          const rsi = computeRSI(closes, effectiveRSIPeriod);
           const rsiCategory = categorizeRSI(rsi);
 
           const rsiBias =
@@ -302,7 +312,7 @@ const longTermView = evaluateLongTerm({
       })
     );
 
-    res.json({ results, compliance, meta: { gapThreshold, rsiPeriod } });
+    res.json({ results, compliance, meta: { gapThreshold, rsiPeriod: effectiveRSIPeriod } });
   } catch (err) {
     console.error('scan error', err);
     res.status(500).json({ error: 'Failed to scan symbols' });

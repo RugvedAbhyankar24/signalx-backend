@@ -514,9 +514,10 @@ export function calculateIntradayEntryPrice({
   let entryPrice = price;
   let entryReason = '';
   let entryType = 'current';
+  const hasVwap = Number.isFinite(vwap) && vwap > 0;
   
   // 🛡️ OVEREXTENDED VWAP GUARD - Institutional Risk Management
-  const vwapExtension = (price - vwap) / vwap;
+  const vwapExtension = hasVwap ? (price - vwap) / vwap : 0;
   if (vwapExtension > 0.045 && !volumeSpike) {
     return {
       entryPrice: price,
@@ -531,12 +532,12 @@ export function calculateIntradayEntryPrice({
   // Calculate nearest valid levels BELOW price (institutional safety fix)
   const buffer = 0.001; // 0.1% buffer for execution
   const nearestBelowPrice = Math.max(
-    vwap && vwap < price ? vwap : 0, // Only VWAP if below current price
+    hasVwap && vwap < price ? vwap : 0, // Only VWAP if below current price
     support && support < price ? support : 0 // Only support if below current price
   ); // CRITICAL: Never enter above structure unintentionally
   
   // Strategy 1: DUAL-MODE VWAP - Pullback vs Trend Continuation (institutional fix)
-  if (price > vwap && rsi >= 45 && rsi <= 80) {
+  if (hasVwap && price > vwap && rsi >= 45 && rsi <= 80) {
     const vwapDistance = (price - vwap) / vwap;
     
     if (price <= vwap * 1.02) {
@@ -604,11 +605,11 @@ export function calculateIntradayEntryPrice({
   let stopLoss;
   
   // Check if structural levels are within reasonable distance
-  const vwapDistance = vwap ? Math.abs(entryPrice - vwap) / entryPrice : 1;
+  const vwapDistance = hasVwap ? Math.abs(entryPrice - vwap) / entryPrice : 1;
   const supportDistance = support ? Math.abs(entryPrice - support) / entryPrice : 1;
   
   // Use structure only if within 2% of entry, otherwise use percentage
-  if (vwapDistance <= 0.02 && vwap) {
+  if (vwapDistance <= 0.02 && hasVwap) {
     // VWAP is close - use VWAP-based stop
     stopLoss = Math.min(vwap * 0.995, entryPrice * 0.98);
   } else if (supportDistance <= 0.02 && support) {
@@ -664,7 +665,7 @@ export function calculateIntradayEntryPrice({
   const nearestResistance = resistance && resistance > entryPrice ? resistance * 0.995 : null;
   const dayHighLiquidity = Math.max(price, entryPrice * 1.05) * 0.99; // Day high liquidity
   const orbHighLiquidity = entryPrice * 1.02 * 0.99; // ORB high liquidity (2% above entry)
-  const vwapBandLiquidity = vwap ? vwap * 1.03 * 0.99 : null; // VWAP band liquidity
+  const vwapBandLiquidity = hasVwap ? vwap * 1.03 * 0.99 : null; // VWAP band liquidity
   
   // TARGET 1: Nearest liquidity pool (hard cap)
   const liquidityPools = [nearestResistance, orbHighLiquidity, vwapBandLiquidity].filter(Boolean);
@@ -743,18 +744,20 @@ export function evaluateIntraday({
   marketCap
 }) {
   const reasons = []
+  const hasVwap = Number.isFinite(vwap) && vwap > 0;
   
-  const aboveVWAP = price > vwap
-  const belowVWAP = price < vwap
+  const aboveVWAP = hasVwap && price > vwap
+  const belowVWAP = hasVwap && price < vwap
   const breakoutConfirmed = getBreakoutConfirmation(resistance, price, volumeSpike)
   const nearSupport = support && price <= support * 1.02
-  const effectiveGap = gapNowPct || gapOpenPct
-  const volumeOK = volumeSpike || (price > vwap && rsi > 50)
+  const effectiveGap = (gapNowPct ?? gapOpenPct ?? 0)
+  const volumeOK = volumeSpike || (aboveVWAP && rsi > 50)
 
   // Protect against CHOP days - filter sideways markets
   if (
     Math.abs(effectiveGap) < 0.2 &&
     !volumeSpike &&
+    hasVwap &&
     Math.abs(price - vwap) / vwap < 0.002
   ) {
     reasons.push('Low volatility chop – intraday edge absent')
@@ -947,4 +950,3 @@ export function evaluateIntraday({
     reasons
   }
 }
-

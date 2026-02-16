@@ -391,7 +391,7 @@ async function getNSEHeaders(forceRefresh = false) {
   }
 }
 
-export async function fetchNSE(path, retries = 1) {
+export async function fetchNSE(path, retries = 2) {
   return withNSELock(async () => {
     for (let i = 0; i < retries; i++) {
       try {
@@ -532,14 +532,23 @@ export async function fetchFundamentals(symbolBase) {
     })
     const html = await res.text()
 
-    const extract = (regex) =>
-      Number(html.match(regex)?.[1]?.replace(/,/g, '')) || null
+    const extract = (regex) => {
+      const raw = html.match(regex)?.[1]
+      if (!raw) return null
+
+      const cleaned = raw.replace(/,/g, '').trim()
+      const isParenNegative = cleaned.startsWith('(') && cleaned.endsWith(')')
+      const numeric = Number(cleaned.replace(/[()]/g, ''))
+      if (!Number.isFinite(numeric)) return null
+
+      return isParenNegative ? -Math.abs(numeric) : numeric
+    }
 
     return {
-      revenueGrowth: extract(/Sales Growth[^%]*([\d.]+)%/i),
-      profitGrowth: extract(/Profit Growth[^%]*([\d.]+)%/i),
-      roe: extract(/ROE[^%]*([\d.]+)%/i),
-      debtToEquity: extract(/Debt to Equity[^:]*([\d.]+)/i)
+      revenueGrowth: extract(/Sales Growth[^%]*([+-]?\(?[\d.]+\)?)[\s%]/i),
+      profitGrowth: extract(/Profit Growth[^%]*([+-]?\(?[\d.]+\)?)[\s%]/i),
+      roe: extract(/ROE[^%]*([+-]?\(?[\d.]+\)?)[\s%]/i),
+      debtToEquity: extract(/Debt to Equity[^:]*([+-]?\(?[\d.]+\)?)/i)
     }
   } catch {
     return null

@@ -18,6 +18,22 @@ const compliance = {
   recommendationType: 'educational-screening',
   riskDisclosure: 'Do not treat this as investment advice. Validate with your own risk checks and a SEBI-registered advisor before any trade.',
 };
+const IST_PARTS_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Kolkata',
+  weekday: 'short',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23'
+});
+const NSE_HOLIDAYS = new Set(
+  String(process.env.NSE_HOLIDAYS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
 
 // 🗄️ Background scan cache
 let intradayCache = {
@@ -133,8 +149,18 @@ async function startIntradayBackgroundScan() {
 
 // 📡 POST /scan/intraday/start - Start background scan
 router.post('/start', async (req, res) => {
+  const marketState = getIndianMarketState();
+  const forceRunWhenClosed = parseBooleanFlag(req.body?.forceRunWhenClosed, false);
+  if (!marketState.isOpen && !forceRunWhenClosed) {
+    return res.json({
+      status: 'market_closed',
+      marketState,
+      compliance
+    });
+  }
+
   startIntradayBackgroundScan(); // fire & forget
-  res.json({ status: 'scan_started' });
+  res.json({ status: 'scan_started', marketState, compliance });
 });
 
 // 📡 GET /scan/intraday/status - Get cached results
@@ -162,8 +188,82 @@ function extractSymbol(input) {
   return '';
 }
 
+function sanitizeRSIPeriod(input, fallback = 14) {
+  const parsed = Number(input);
+  if (!Number.isFinite(parsed)) return fallback;
+  const asInt = Math.round(parsed);
+  if (asInt < 2) return 2;
+  if (asInt > 50) return 50;
+  return asInt;
+}
+
+function parseBooleanFlag(input, fallback = false) {
+  if (typeof input === 'boolean') return input;
+  if (typeof input === 'string') {
+    const val = input.trim().toLowerCase();
+    if (val === 'true') return true;
+    if (val === 'false') return false;
+  }
+  return fallback;
+}
+
+function getIndianMarketState(now = new Date()) {
+  const parts = IST_PARTS_FORMATTER.formatToParts(now);
+  const pick = (type) => parts.find(p => p.type === type)?.value || '';
+
+  const weekday = pick('weekday');
+  const year = pick('year');
+  const month = pick('month');
+  const day = pick('day');
+  const hour = Number(pick('hour'));
+  const minute = Number(pick('minute'));
+
+  const istDate = `${year}-${month}-${day}`;
+  const mins = hour * 60 + minute;
+  const sessionOpen = 9 * 60 + 15;
+  const sessionClose = 15 * 60 + 30;
+  const isWeekend = weekday === 'Sat' || weekday === 'Sun';
+  const isHoliday = NSE_HOLIDAYS.has(istDate);
+  const isSessionTime = mins >= sessionOpen && mins <= sessionClose;
+  const isOpen = !isWeekend && !isHoliday && isSessionTime;
+
+  let reason = 'market_open';
+  if (isWeekend) reason = 'weekend';
+  else if (isHoliday) reason = 'configured_holiday';
+  else if (!isSessionTime) reason = 'outside_trading_hours_ist';
+
+  return {
+    isOpen,
+    reason,
+    istDate,
+    istTime: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+  };
+}
+
 router.post('/', async (req, res) => {
-  const { symbols, rsiPeriod = 14, useTwoStageScan = true } = req.body || {};
+  const {
+    symbols,
+    rsiPeriod = 14,
+    useTwoStageScan = true,
+    forceRunWhenClosed = false
+  } = req.body || {};
+  const effectiveRSIPeriod = sanitizeRSIPeriod(rsiPeriod, 14);
+  const marketState = getIndianMarketState();
+
+  if (!marketState.isOpen && !parseBooleanFlag(forceRunWhenClosed, false)) {
+    return res.json({
+      positiveStocks: [],
+      totalScanned: 0,
+      positiveCount: 0,
+      compliance,
+      meta: {
+        rsiPeriod: effectiveRSIPeriod,
+        scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
+        institutionalFiltering: true,
+        marketState
+      }
+    });
+  }
 
   try {
     // If no symbols provided, use institutional-grade scanning
@@ -214,7 +314,7 @@ router.post('/', async (req, res) => {
           ====================== */
           const candles = await fetchOHLCV(
             resolvedSymbol,
-            Math.max(60, rsiPeriod + 20),
+            Math.max(60, effectiveRSIPeriod + 20),
             { interval: '5m', range: '5d' }
           );
 
@@ -224,7 +324,7 @@ router.post('/', async (req, res) => {
           /* =====================
              RSI
           ====================== */
-          const rsi = computeRSI(closes, rsiPeriod);
+          const rsi = computeRSI(closes, effectiveRSIPeriod);
 
           /* =====================
              TECHNICALS
@@ -343,10 +443,11 @@ router.post('/', async (req, res) => {
       positiveCount: positiveStocks.length,
       compliance,
       meta: { 
-        rsiPeriod,
+        rsiPeriod: effectiveRSIPeriod,
         scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
         stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
-        institutionalFiltering: true
+        institutionalFiltering: true,
+        marketState
       }
     });
   } catch (err) {
