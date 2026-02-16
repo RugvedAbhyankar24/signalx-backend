@@ -2,10 +2,9 @@ import express from 'express';
 import { fetchGapData, fetchOHLCV, fetchMarketMovers, fastMarketScan } from '../services/marketData.js';
 import {
   detectVolumeSpike,
-  calculateVWAP,
   calculateIntradayVWAP,
   supportResistance,
-  detectBreakout
+  estimateATRPercent
 } from '../services/technicalIndicators.js';
 import { computeRSI } from '../services/rsiCalculator.js';
 import { evaluateIntraday, calculateIntradayEntryPrice } from '../services/positionEvaluator.js';
@@ -69,6 +68,33 @@ async function mapWithConcurrency(items, concurrency, fn) {
   return results;
 }
 
+function isFiniteOHLC(candle) {
+  const open = Number(candle?.open);
+  const high = Number(candle?.high);
+  const low = Number(candle?.low);
+  const close = Number(candle?.close);
+  return (
+    Number.isFinite(open) &&
+    Number.isFinite(high) &&
+    Number.isFinite(low) &&
+    Number.isFinite(close) &&
+    high >= low
+  );
+}
+
+function selectCandlesForTechnicals(candles, minCount = 20) {
+  if (!Array.isArray(candles) || candles.length === 0) return [];
+
+  const tradable = candles.filter(c => {
+    const volume = Number(c?.volume);
+    return isFiniteOHLC(c) && Number.isFinite(volume) && volume > 0;
+  });
+  if (tradable.length >= minCount) return tradable;
+
+  const priced = candles.filter(isFiniteOHLC);
+  return priced.length ? priced : [];
+}
+
 // 📊 Deep scan single symbol
 async function deepScanSymbol(symbol) {
   try {
@@ -88,16 +114,19 @@ async function deepScanSymbol(symbol) {
       Math.max(60, 14 + 20),
       { interval: '5m', range: '5d' }
     );
-    const closes = candles.map(c => c.close);
-    const lastCandle = candles[candles.length - 1];
+    const technicalCandles = selectCandlesForTechnicals(candles, 20);
+    const closes = technicalCandles.map(c => c.close);
+    const lastCandle = technicalCandles[technicalCandles.length - 1] || candles[candles.length - 1];
     const rsi = computeRSI(closes, 14);
     
-    const volumeData = detectVolumeSpike(candles);
-    const vwap = calculateIntradayVWAP(candles);
-    const { support, resistance } = supportResistance(candles);
+    const volumeData = detectVolumeSpike(technicalCandles);
+    const vwap = calculateIntradayVWAP(technicalCandles);
+    const { support, resistance } = supportResistance(technicalCandles);
+    const volatilityPct = estimateATRPercent(technicalCandles, 14);
     
-    const candleColor = lastCandle.close > lastCandle.open ? 'green' : 
-                       lastCandle.close < lastCandle.open ? 'red' : 'neutral';
+    const candleColor = lastCandle
+      ? (lastCandle.close > lastCandle.open ? 'green' : lastCandle.close < lastCandle.open ? 'red' : 'neutral')
+      : 'neutral';
 
     const intradayView = evaluateIntraday({
       rsi, gapOpenPct: gapData.gapOpenPct, gapNowPct: gapData.gapNowPct,
@@ -107,7 +136,8 @@ async function deepScanSymbol(symbol) {
 
     const entryPriceData = calculateIntradayEntryPrice({
       price: gapData.currentPrice, vwap, support, resistance, rsi,
-      candleColor, gapOpenPct: gapData.gapOpenPct, volumeSpike: volumeData.volumeSpike
+      candleColor, gapOpenPct: gapData.gapOpenPct, volumeSpike: volumeData.volumeSpike,
+      volatilityPct
     });
 
     return {
@@ -115,12 +145,18 @@ async function deepScanSymbol(symbol) {
       gapOpenPct: gapData.gapOpenPct, gapNowPct: gapData.gapNowPct,
       prevClose: gapData.prevClose, open: gapData.open, currentPrice: gapData.currentPrice,
       marketCap: gapData.marketCap, priceSource: gapData.priceSource, rsi, candleColor,
-      volume: volumeData, vwap, support, resistance, resolvedSymbol, intradayView,
+      volume: volumeData, vwap, support, resistance,
+      volatilityPct: Number.isFinite(volatilityPct) ? Number(volatilityPct.toFixed(2)) : null,
+      resolvedSymbol, intradayView,
       finalSentiment: intradayView.sentiment,
       entryPrice: entryPriceData.entryPrice, stopLoss: entryPriceData.stopLoss,
       target1: entryPriceData.target1, target2: entryPriceData.target2,
       entryReason: entryPriceData.entryReason, entryType: entryPriceData.entryType,
-      riskReward: entryPriceData.riskReward
+      riskReward: entryPriceData.riskReward,
+      riskRewardAfterCosts: entryPriceData.riskRewardAfterCosts,
+      riskRewardGross: entryPriceData.riskRewardGross,
+      estimatedRoundTripCostPerShare: entryPriceData.estimatedRoundTripCostPerShare,
+      estimatedRoundTripCostPct: entryPriceData.estimatedRoundTripCostPct
     };
   } catch (e) {
     return { symbol, error: e.message || 'Failed to process symbol' };
@@ -330,9 +366,9 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             Math.max(60, effectiveRSIPeriod + 20),
             { interval: '5m', range: '5d' }
           );
-
-          const closes = candles.map(c => c.close);
-          const lastCandle = candles[candles.length - 1];
+          const technicalCandles = selectCandlesForTechnicals(candles, Math.max(20, effectiveRSIPeriod + 1));
+          const closes = technicalCandles.map(c => c.close);
+          const lastCandle = technicalCandles[technicalCandles.length - 1] || candles[candles.length - 1];
 
           /* =====================
              RSI
@@ -342,14 +378,15 @@ router.post('/', intradayScanLimiter, async (req, res) => {
           /* =====================
              TECHNICALS
           ====================== */
-          const volumeData = detectVolumeSpike(candles);
-          const vwap = calculateIntradayVWAP(candles);
-          const { support, resistance } = supportResistance(candles);
+          const volumeData = detectVolumeSpike(technicalCandles);
+          const vwap = calculateIntradayVWAP(technicalCandles);
+          const { support, resistance } = supportResistance(technicalCandles);
+          const volatilityPct = estimateATRPercent(technicalCandles, 14);
 
           const candleColor =
-            lastCandle.close > lastCandle.open
+            lastCandle && lastCandle.close > lastCandle.open
               ? 'green'
-              : lastCandle.close < lastCandle.open
+              : lastCandle && lastCandle.close < lastCandle.open
               ? 'red'
               : 'neutral';
 
@@ -380,7 +417,8 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             rsi,
             candleColor,
             gapOpenPct: gapData.gapOpenPct,
-            volumeSpike: volumeData.volumeSpike
+            volumeSpike: volumeData.volumeSpike,
+            volatilityPct
           });
 
           /* =====================
@@ -407,6 +445,7 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             vwap,
             support,
             resistance,
+            volatilityPct: Number.isFinite(volatilityPct) ? Number(volatilityPct.toFixed(2)) : null,
 
             resolvedSymbol,
             intradayView,
@@ -419,7 +458,11 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             target2: entryPriceData.target2,
             entryReason: entryPriceData.entryReason,
             entryType: entryPriceData.entryType,
-            riskReward: entryPriceData.riskReward
+            riskReward: entryPriceData.riskReward,
+            riskRewardAfterCosts: entryPriceData.riskRewardAfterCosts,
+            riskRewardGross: entryPriceData.riskRewardGross,
+            estimatedRoundTripCostPerShare: entryPriceData.estimatedRoundTripCostPerShare,
+            estimatedRoundTripCostPct: entryPriceData.estimatedRoundTripCostPct
           };
         } catch (e) {
           return {

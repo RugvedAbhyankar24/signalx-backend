@@ -2,10 +2,9 @@ import express from 'express';
 import { fetchGapData, fetchOHLCV, fetchMarketMovers, fastMarketScan } from '../services/marketData.js';
 import {
   detectVolumeSpike,
-  calculateVWAP,
   calculateSwingVWAP,
   supportResistance,
-  detectBreakout
+  estimateATRPercent
 } from '../services/technicalIndicators.js';
 import { computeRSI } from '../services/rsiCalculator.js';
 import { evaluateSwing, calculateSwingEntryPrice } from '../services/positionEvaluator.js';
@@ -53,6 +52,33 @@ async function mapWithConcurrency(items, concurrency, fn) {
   return results;
 }
 
+function isFiniteOHLC(candle) {
+  const open = Number(candle?.open);
+  const high = Number(candle?.high);
+  const low = Number(candle?.low);
+  const close = Number(candle?.close);
+  return (
+    Number.isFinite(open) &&
+    Number.isFinite(high) &&
+    Number.isFinite(low) &&
+    Number.isFinite(close) &&
+    high >= low
+  );
+}
+
+function selectCandlesForTechnicals(candles, minCount = 20) {
+  if (!Array.isArray(candles) || candles.length === 0) return [];
+
+  const tradable = candles.filter(c => {
+    const volume = Number(c?.volume);
+    return isFiniteOHLC(c) && Number.isFinite(volume) && volume > 0;
+  });
+  if (tradable.length >= minCount) return tradable;
+
+  const priced = candles.filter(isFiniteOHLC);
+  return priced.length ? priced : [];
+}
+
 // 📊 Deep scan single symbol for swing
 async function deepScanSwingSymbol(symbol) {
   try {
@@ -68,25 +94,29 @@ async function deepScanSwingSymbol(symbol) {
     const resolvedSymbol = await resolveNSESymbol(symbol);
     const gapData = await fetchGapData(resolvedSymbol);
     const candles = await fetchOHLCV(resolvedSymbol, Math.max(60, 14 + 20));
-    const closes = candles.map(c => c.close);
-    const lastCandle = candles[candles.length - 1];
+    const technicalCandles = selectCandlesForTechnicals(candles, 20);
+    const closes = technicalCandles.map(c => c.close);
+    const lastCandle = technicalCandles[technicalCandles.length - 1] || candles[candles.length - 1];
     const rsi = computeRSI(closes, 14);
     
-    const volumeData = detectVolumeSpike(candles);
-    const swingVwap = calculateSwingVWAP(candles, 5);
-    const { support, resistance } = supportResistance(candles);
+    const volumeData = detectVolumeSpike(technicalCandles);
+    const swingVwap = calculateSwingVWAP(technicalCandles, 5);
+    const { support, resistance } = supportResistance(technicalCandles);
+    const volatilityPct = estimateATRPercent(technicalCandles, 14);
     
-    const candleColor = lastCandle.close > lastCandle.open ? 'green' : 
-                       lastCandle.close < lastCandle.open ? 'red' : 'neutral';
+    const candleColor = lastCandle
+      ? (lastCandle.close > lastCandle.open ? 'green' : lastCandle.close < lastCandle.open ? 'red' : 'neutral')
+      : 'neutral';
 
     const swingView = evaluateSwing({
-      rsi, gapOpenPct: gapData.gapOpenPct, volumeSpike: volumeData.volumeSpike,
+      rsi, gapOpenPct: gapData.gapOpenPct, gapNowPct: gapData.gapNowPct, volumeSpike: volumeData.volumeSpike,
       price: gapData.currentPrice, swingVWAP: swingVwap, support, resistance
     });
 
     const swingEntryPriceData = calculateSwingEntryPrice({
-      price: gapData.currentPrice, swingVWAP: swingVwap, support, resistance, rsi,
-      candleColor, gapOpenPct: gapData.gapOpenPct, volumeSpike: volumeData.volumeSpike
+      price: gapData.currentPrice, marketCap: gapData.marketCap, swingVWAP: swingVwap, support, resistance, rsi,
+      candleColor, gapOpenPct: gapData.gapOpenPct, gapNowPct: gapData.gapNowPct, volumeSpike: volumeData.volumeSpike,
+      volatilityPct
     });
 
     return {
@@ -95,11 +125,16 @@ async function deepScanSwingSymbol(symbol) {
       prevClose: gapData.prevClose, open: gapData.open, currentPrice: gapData.currentPrice,
       marketCap: gapData.marketCap, priceSource: gapData.priceSource, rsi, candleColor,
       volume: volumeData, vwap: swingVwap, swingVwap: swingVwap, support, resistance,
+      volatilityPct: Number.isFinite(volatilityPct) ? Number(volatilityPct.toFixed(2)) : null,
       resolvedSymbol, swingView, finalSentiment: swingView.sentiment,
       entryPrice: swingEntryPriceData.entryPrice, stopLoss: swingEntryPriceData.stopLoss,
       target1: swingEntryPriceData.target1, target2: swingEntryPriceData.target2,
       entryReason: swingEntryPriceData.entryReason, entryType: swingEntryPriceData.entryType,
-      riskReward: swingEntryPriceData.riskReward
+      riskReward: swingEntryPriceData.riskReward,
+      riskRewardAfterCosts: swingEntryPriceData.riskRewardAfterCosts,
+      riskRewardGross: swingEntryPriceData.riskRewardGross,
+      estimatedRoundTripCostPerShare: swingEntryPriceData.estimatedRoundTripCostPerShare,
+      estimatedRoundTripCostPct: swingEntryPriceData.estimatedRoundTripCostPct
     };
   } catch (e) {
     return { symbol, error: e.message || 'Failed to process symbol' };
@@ -124,14 +159,12 @@ async function startSwingBackgroundScan() {
       async (stock) => deepScanSwingSymbol(stock?.symbol ?? stock)
     );
 
-    swingCache.results = results.filter(r => 
-      !r.error && r.swingView?.sentiment === 'positive' &&
-      r.entryType !== 'rr_weak' && parseFloat(r.riskReward) >= 1.0
-    );
+    const quality = buildQualitySwingList(results);
+    swingCache.results = quality.stocks;
 
     swingCache.status = 'done';
     swingCache.updatedAt = Date.now();
-    console.log(`✅ Background swing scan completed: ${swingCache.results.length} positive stocks`);
+    console.log(`✅ Background swing scan completed: ${swingCache.results.length} quality stocks`);
   } catch (error) {
     console.error('❌ Background swing scan error:', error);
     swingCache.status = 'error';
@@ -177,6 +210,122 @@ function sanitizeRSIPeriod(input, fallback = 14) {
   if (asInt < 2) return 2;
   if (asInt > 50) return 50;
   return asInt;
+}
+
+function toFinite(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function computeSwingQualityScore(stock) {
+  const rr = toFinite(stock?.riskRewardAfterCosts ?? stock?.riskReward) ?? 0;
+  const rsi = toFinite(stock?.rsi);
+  const gapNow = toFinite(stock?.gapNowPct);
+  const volPct = toFinite(stock?.volatilityPct);
+  const price = toFinite(stock?.currentPrice);
+  const swingVwap = toFinite(stock?.swingVwap ?? stock?.vwap);
+  const aboveStructure = price != null && swingVwap != null && price >= swingVwap;
+  const entryType = String(stock?.entryType || '');
+  const label = String(stock?.swingView?.label || '');
+  const volumeSpike = Boolean(stock?.volume?.volumeSpike);
+
+  let score = 0;
+
+  if (label === 'High-Quality Swing Setup') score += 30;
+  else if (label === 'Breakout Swing Setup') score += 26;
+  else if (label === 'Support-Based Swing Attempt') score += 22;
+  else if (label === 'Potential Swing – Needs Confirmation') score += 18;
+  else if (label === 'Consolidation Watch') score += 15;
+
+  if (entryType === 'swing_vwap') score += 15;
+  else if (entryType === 'swing_breakout') score += 13;
+  else if (entryType === 'swing_support') score += 12;
+  else if (entryType === 'swing_consolidation') score += 8;
+  else if (entryType === 'swing_momentum') score += 6;
+  else if (entryType === 'swing_market') score += 2;
+
+  if (rr >= 2.0) score += 22;
+  else if (rr >= 1.7) score += 18;
+  else if (rr >= 1.5) score += 14;
+  else if (rr >= 1.3) score += 10;
+  else if (rr >= 1.1) score += 6;
+  else if (rr >= 1.0) score += 3;
+  else score -= 20;
+
+  if (volumeSpike) score += 8;
+  else score += 3;
+  if (aboveStructure) score += 6;
+
+  if (rsi != null) {
+    if (rsi >= 45 && rsi <= 62) score += 8;
+    else if (rsi >= 40 && rsi <= 66) score += 4;
+    else if (rsi < 35 || rsi > 70) score -= 5;
+  }
+
+  if (gapNow != null) {
+    if (gapNow < -2.0) score -= 18;
+    else if (gapNow > 7.0) score -= 5;
+    else if (gapNow >= -0.5 && gapNow <= 5.5) score += 4;
+  }
+
+  if (volPct != null) {
+    if (volPct > 6.2) score -= 6;
+    else if (volPct >= 2.0 && volPct <= 4.8) score += 3;
+  }
+
+  return Math.round(score);
+}
+
+function deriveAdaptiveQualityThreshold(scoredCandidates) {
+  if (!Array.isArray(scoredCandidates) || scoredCandidates.length === 0) return 40;
+  const scores = scoredCandidates
+    .map(s => toFinite(s?.qualityScore))
+    .filter(v => v != null)
+    .sort((a, b) => a - b);
+  if (!scores.length) return 40;
+
+  const p60 = scores[Math.floor((scores.length - 1) * 0.6)];
+  const median = scores[Math.floor((scores.length - 1) * 0.5)];
+  const raw = Math.round((p60 * 0.6) + (median * 0.4));
+  return Math.min(Math.max(raw, 34), 56);
+}
+
+function buildQualitySwingList(results) {
+  const base = results
+    .filter(stock =>
+      !stock.error &&
+      !stock.filtered &&
+      stock.swingView &&
+      stock.swingView.sentiment === 'positive'
+    )
+    .map(stock => ({
+      ...stock,
+      qualityScore: computeSwingQualityScore(stock)
+    }))
+    .filter(stock => {
+      const rr = toFinite(stock.riskRewardAfterCosts ?? stock.riskReward);
+      if (rr == null || rr < 1.0) return false;
+      if (stock.entryType === 'swing_market') {
+        const rsi = toFinite(stock.rsi);
+        const gapNow = toFinite(stock.gapNowPct);
+        const volumeSpike = Boolean(stock?.volume?.volumeSpike);
+        if (!volumeSpike) return false;
+        if (rsi != null && (rsi < 38 || rsi > 64)) return false;
+        if (gapNow != null && gapNow < -1.8) return false;
+      }
+      return true;
+    });
+
+  const threshold = deriveAdaptiveQualityThreshold(base);
+  return {
+    qualityThreshold: threshold,
+    stocks: base
+      .filter(stock => stock.qualityScore >= threshold)
+      .sort((a, b) => {
+        if (b.qualityScore !== a.qualityScore) return b.qualityScore - a.qualityScore;
+        return (toFinite(b.riskRewardAfterCosts ?? b.riskReward) ?? 0) - (toFinite(a.riskRewardAfterCosts ?? a.riskReward) ?? 0);
+      })
+  };
 }
 
 router.post('/', swingScanLimiter, async (req, res) => {
@@ -234,9 +383,9 @@ router.post('/', swingScanLimiter, async (req, res) => {
             resolvedSymbol,
             Math.max(60, effectiveRSIPeriod + 20)
           );
-
-          const closes = candles.map(c => c.close);
-          const lastCandle = candles[candles.length - 1];
+          const technicalCandles = selectCandlesForTechnicals(candles, Math.max(20, effectiveRSIPeriod + 1));
+          const closes = technicalCandles.map(c => c.close);
+          const lastCandle = technicalCandles[technicalCandles.length - 1] || candles[candles.length - 1];
 
           /* =====================
              RSI
@@ -246,14 +395,15 @@ router.post('/', swingScanLimiter, async (req, res) => {
           /* =====================
              TECHNICALS
           ====================== */
-          const volumeData = detectVolumeSpike(candles);
-          const swingVwap = calculateSwingVWAP(candles, 5); // 5-day VWAP for swing
-          const { support, resistance } = supportResistance(candles);
+          const volumeData = detectVolumeSpike(technicalCandles);
+          const swingVwap = calculateSwingVWAP(technicalCandles, 5); // 5-day VWAP for swing
+          const { support, resistance } = supportResistance(technicalCandles);
+          const volatilityPct = estimateATRPercent(technicalCandles, 14);
 
           const candleColor =
-            lastCandle.close > lastCandle.open
+            lastCandle && lastCandle.close > lastCandle.open
               ? 'green'
-              : lastCandle.close < lastCandle.open
+              : lastCandle && lastCandle.close < lastCandle.open
               ? 'red'
               : 'neutral';
 
@@ -263,6 +413,7 @@ router.post('/', swingScanLimiter, async (req, res) => {
           const swingView = evaluateSwing({
             rsi,
             gapOpenPct: gapData.gapOpenPct,
+            gapNowPct: gapData.gapNowPct,
             volumeSpike: volumeData.volumeSpike,
             price: gapData.currentPrice,
             swingVWAP: swingVwap, // Explicit swing VWAP parameter
@@ -275,13 +426,16 @@ router.post('/', swingScanLimiter, async (req, res) => {
           ====================== */
           const swingEntryPriceData = calculateSwingEntryPrice({
             price: gapData.currentPrice,
+            marketCap: gapData.marketCap,
             swingVWAP: swingVwap, // Explicit swing VWAP parameter
             support,
             resistance,
             rsi,
             candleColor,
             gapOpenPct: gapData.gapOpenPct,
-            volumeSpike: volumeData.volumeSpike
+            gapNowPct: gapData.gapNowPct,
+            volumeSpike: volumeData.volumeSpike,
+            volatilityPct
           });
 
           /* =====================
@@ -331,6 +485,7 @@ router.post('/', swingScanLimiter, async (req, res) => {
             swingVwap: swingVwap, // Explicit swing VWAP for frontend
             support,
             resistance,
+            volatilityPct: Number.isFinite(volatilityPct) ? Number(volatilityPct.toFixed(2)) : null,
 
             resolvedSymbol,
             swingView,
@@ -342,7 +497,11 @@ router.post('/', swingScanLimiter, async (req, res) => {
             target2: swingEntryPriceData.target2,
             entryReason: swingEntryPriceData.entryReason,
             entryType: swingEntryPriceData.entryType,
-            riskReward: swingEntryPriceData.riskReward
+            riskReward: swingEntryPriceData.riskReward,
+            riskRewardAfterCosts: swingEntryPriceData.riskRewardAfterCosts,
+            riskRewardGross: swingEntryPriceData.riskRewardGross,
+            estimatedRoundTripCostPerShare: swingEntryPriceData.estimatedRoundTripCostPerShare,
+            estimatedRoundTripCostPct: swingEntryPriceData.estimatedRoundTripCostPct
           };
         } catch (e) {
           return {
@@ -353,26 +512,8 @@ router.post('/', swingScanLimiter, async (req, res) => {
       })
     );
 
-    // Filter only positive swing stocks that pass risk/reward validation
-    const positiveSwingStocks = results.filter(
-      stock => !stock.error && 
-               !stock.filtered && // Exclude risk/reward filtered stocks
-               stock.swingView && 
-               stock.swingView.sentiment === 'positive'
-    );
-
-    // Sort by signal strength
-    positiveSwingStocks.sort((a, b) => {
-      const getScore = (stock) => {
-        if (stock.swingView.label === 'High-Quality Swing Setup') return 4;
-        if (stock.swingView.label === 'Breakout Swing Setup') return 3;
-        if (stock.swingView.label === 'Potential Swing – Needs Confirmation') return 2;
-        if (stock.swingView.label === 'Support-Based Swing Attempt') return 2;
-        if (stock.swingView.label === 'Consolidation Watch') return 1;
-        return 0;
-      };
-      return getScore(b) - getScore(a);
-    });
+    const quality = buildQualitySwingList(results);
+    const positiveSwingStocks = quality.stocks;
 
     res.json({ 
       positiveSwingStocks,
@@ -384,7 +525,9 @@ router.post('/', swingScanLimiter, async (req, res) => {
         scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
         stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
         institutionalFiltering: true,
-        riskRewardThreshold: '1:1 minimum'
+        riskRewardThreshold: '1:1 minimum',
+        qualityMode: 'balanced-adaptive',
+        qualityScoreThreshold: quality.qualityThreshold
       }
     });
   } catch (err) {

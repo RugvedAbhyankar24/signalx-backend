@@ -217,7 +217,13 @@ const gapData = await fetchGapData(resolvedSymbol)
 ===================== */
 const swingView = evaluateSwing({
   rsi,
-  gapOpenPct: gapData.gapOpenPct
+  gapOpenPct: gapData.gapOpenPct,
+  gapNowPct: gapData.gapNowPct,
+  volumeSpike: volumeData.volumeSpike,
+  price: gapData.currentPrice,
+  swingVWAP: vwap,
+  support,
+  resistance
 })
 
 const fundamentals = await fetchFundamentals(resolvedSymbol)

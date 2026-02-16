@@ -17,16 +17,32 @@ function toFiniteNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function trueRange(current, previousClose) {
+  const high = toFiniteNumber(current?.high);
+  const low = toFiniteNumber(current?.low);
+  const prevClose = toFiniteNumber(previousClose);
+  if (high == null || low == null) return null;
+
+  const range1 = high - low;
+  if (prevClose == null) return range1;
+  const range2 = Math.abs(high - prevClose);
+  const range3 = Math.abs(low - prevClose);
+  return Math.max(range1, range2, range3);
+}
+
 export function detectVolumeSpike(candles, lookback = 20, multiplier = 1.5) {
   if (!Array.isArray(candles) || candles.length === 0) {
     return { volumeSpike: false, avgVolume: null, latestVolume: null };
   }
 
-  const latestVol = toFiniteNumber(candles[candles.length - 1]?.volume);
-  const vols = candles
-    .slice(-lookback - 1, -1)
+  const validVolumes = candles
     .map(c => toFiniteNumber(c?.volume))
-    .filter(v => v != null && v >= 0);
+    .filter(v => v != null && v > 0);
+  const latestVol = validVolumes.length ? validVolumes[validVolumes.length - 1] : null;
+  const vols = candles
+    .slice(-lookback - 2, -1)
+    .map(c => toFiniteNumber(c?.volume))
+    .filter(v => v != null && v > 0);
   const avgVol = vols.length
     ? vols.reduce((a, b) => a + b, 0) / vols.length
     : latestVol;
@@ -178,4 +194,23 @@ export function calculateRSI(prices, period = 14) {
 
   const rs = avgGain / (avgLoss || 0.0001); // Avoid division by zero
   return 100 - (100 / (1 + rs));
+}
+
+export function estimateATRPercent(candles, period = 14) {
+  if (!Array.isArray(candles) || candles.length < 2) return null;
+  const relevant = candles.slice(-Math.max(period + 1, 6));
+  if (relevant.length < 2) return null;
+
+  const trValues = [];
+  for (let i = 1; i < relevant.length; i++) {
+    const tr = trueRange(relevant[i], relevant[i - 1]?.close);
+    if (tr != null && tr >= 0) trValues.push(tr);
+  }
+
+  if (!trValues.length) return null;
+  const atr = trValues.reduce((a, b) => a + b, 0) / trValues.length;
+  const close = toFiniteNumber(relevant[relevant.length - 1]?.close);
+  if (close == null || close <= 0) return null;
+
+  return (atr / close) * 100;
 }
