@@ -183,7 +183,9 @@ async function startIntradayBackgroundScan() {
 
     intradayCache.results = results.filter(r => 
       !r.error && r.intradayView?.sentiment === 'positive' &&
-      r.entryType !== 'scalp_only' && parseFloat(r.riskReward) >= 1.0
+      r.entryType !== 'scalp_only' &&
+      r.entryType !== 'rr_weak' &&
+      parseFloat(r.riskReward) >= 1.0
     );
 
     intradayCache.status = 'done';
@@ -479,6 +481,7 @@ router.post('/', intradayScanLimiter, async (req, res) => {
               stock.intradayView && 
               stock.intradayView.sentiment === 'positive' &&
               stock.entryType !== 'scalp_only' && // Exclude overextended VWAP entries
+              stock.entryType !== 'rr_weak' && // Exclude weak RR setups flagged by calculator
               parseFloat(stock.riskReward) >= 1.0 // Exclude RR < 1:1
     );
 

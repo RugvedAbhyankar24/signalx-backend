@@ -471,29 +471,121 @@ export async function fastMarketScan() {
   const data = await fetchNSE('/equity-stockIndices?index=NIFTY%20500')
   const stocks = data?.data || []
 
-  return stocks
-    .filter(s => {
-      // Stage 1: Fast, cheap filters
-      const movement = Math.abs(s.pChange || 0)
-      const price = s.lastPrice || 0
-      const volume = s.totalTradedVolume || 0
-      
-      return (
-        movement >= 0.5 &&           // Lower threshold for initial scan
-        price > 10 &&                 // Basic price filter
-        volume > 50000               // Basic volume filter
-      )
+  const stage1Limit = Math.max(
+    30,
+    Math.min(120, Number(process.env.FAST_SCAN_STAGE1_LIMIT || 50))
+  )
+  const minPrice = Number(process.env.FAST_SCAN_MIN_PRICE || 10)
+  const minVolume = Number(process.env.FAST_SCAN_MIN_VOLUME || 50000)
+  const minMovement = Number(process.env.FAST_SCAN_MIN_MOVEMENT || 0.3)
+  const minTurnover = Number(process.env.FAST_SCAN_MIN_TURNOVER || 75000000) // 7.5 Cr
+
+  const normalized = stocks
+    .map(s => {
+      const symbol = s?.symbol
+      const price = Number(s?.lastPrice)
+      const changePct = Number(s?.pChange)
+      const prevClose = Number(s?.previousClose)
+      const open = Number(s?.open)
+      const dayHigh = Number(s?.dayHigh)
+      const dayLow = Number(s?.dayLow)
+      const volume = Number(s?.totalTradedVolume)
+
+      if (!symbol || !Number.isFinite(price) || !Number.isFinite(changePct) || !Number.isFinite(volume)) {
+        return null
+      }
+      if (!(price > minPrice) || !(volume > minVolume)) return null
+
+      const movement = Math.abs(changePct)
+      if (movement < minMovement) return null
+
+      const turnover = price * volume
+      const intradayMoveFromOpen =
+        Number.isFinite(open) && open > 0 ? ((price - open) / open) * 100 : changePct
+      const dayRangePct =
+        Number.isFinite(dayHigh) && Number.isFinite(dayLow) && Number.isFinite(prevClose) && prevClose > 0
+          ? ((dayHigh - dayLow) / prevClose) * 100
+          : movement
+      const nearHighScore =
+        Number.isFinite(dayHigh) && dayHigh > 0 ? 1 - Math.min(Math.max((dayHigh - price) / dayHigh, 0), 1) : 0.5
+
+      const directionalBias = changePct >= 0 ? changePct : changePct * 0.35
+      const participationScore = Math.max(changePct, 0.15) * Math.sqrt(Math.max(volume, 1))
+
+      const compositeScore =
+        movement * 3.9 +
+        Math.log10(Math.max(turnover, 1)) * 2.0 +
+        directionalBias * 0.85 +
+        Math.max(intradayMoveFromOpen, -2) * 0.25 +
+        Math.max(dayRangePct, 0) * 0.35 +
+        nearHighScore * 1.4
+
+      return {
+        symbol,
+        price,
+        changePct,
+        volume,
+        movement,
+        turnover,
+        participationScore,
+        intradayMoveFromOpen,
+        dayRangePct,
+        nearHighScore,
+        compositeScore,
+        gapPct: Number.isFinite(prevClose) && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : null
+      }
     })
-    .sort((a, b) => Math.abs(b.pChange || 0) - Math.abs(a.pChange || 0))
-    .slice(0, 50)                    // Shortlist 30-50 stocks for deep scan
+    .filter(Boolean)
+
+  let institutionalPool = normalized.filter(s => s.turnover >= minTurnover)
+  if (institutionalPool.length < stage1Limit) {
+    institutionalPool = normalized
+  }
+
+  const momentumCount = Math.max(10, Math.round(stage1Limit * 0.45))
+  const liquidityCount = Math.max(10, Math.round(stage1Limit * 0.35))
+  const participationCount = Math.max(8, Math.round(stage1Limit * 0.3))
+  const compositeCount = Math.max(12, Math.round(stage1Limit * 0.45))
+
+  const momentumLeaders = [...institutionalPool]
+    .sort((a, b) => b.movement - a.movement)
+    .slice(0, momentumCount)
+
+  const liquidityLeaders = [...institutionalPool]
+    .sort((a, b) => b.turnover - a.turnover)
+    .slice(0, liquidityCount)
+
+  const participationLeaders = [...institutionalPool]
+    .sort((a, b) => b.participationScore - a.participationScore)
+    .slice(0, participationCount)
+
+  const compositeLeaders = [...institutionalPool]
+    .sort((a, b) => b.compositeScore - a.compositeScore)
+    .slice(0, compositeCount)
+
+  const unique = new Map()
+  for (const item of [...compositeLeaders, ...momentumLeaders, ...liquidityLeaders, ...participationLeaders, ...institutionalPool]) {
+    const existing = unique.get(item.symbol)
+    if (!existing || item.compositeScore > existing.compositeScore) {
+      unique.set(item.symbol, item)
+    }
+    if (unique.size >= stage1Limit * 2) break
+  }
+
+  return [...unique.values()]
+    .sort((a, b) => b.compositeScore - a.compositeScore)
+    .slice(0, stage1Limit)
     .map(s => ({
       symbol: s.symbol,
-      price: s.lastPrice,
-      changePct: s.pChange,
-      volume: s.totalTradedVolume,
-      movement: Math.abs(s.pChange || 0),
-      // Quick gap calculation if previous close available
-      gapPct: s.previousClose ? ((s.lastPrice - s.previousClose) / s.previousClose) * 100 : null
+      price: s.price,
+      changePct: s.changePct,
+      volume: s.volume,
+      movement: s.movement,
+      turnover: Math.round(s.turnover),
+      intradayMoveFromOpen: Number(s.intradayMoveFromOpen.toFixed(2)),
+      dayRangePct: Number(s.dayRangePct.toFixed(2)),
+      gapPct: s.gapPct == null ? null : Number(s.gapPct.toFixed(2)),
+      compositeScore: Number(s.compositeScore.toFixed(2))
     }))
 }
 

@@ -832,6 +832,38 @@ export function calculateIntradayEntryPrice({
     entryType = 'volume_confirmed_level'
   }
 
+  const pullbackPreferredEntryTypes = new Set([
+    'vwap_pullback',
+    'trend_continuation',
+    'support_level',
+    'consolidation_level',
+    'volume_confirmed_level',
+    'market_level'
+  ])
+  if (pullbackPreferredEntryTypes.has(entryType)) {
+    const minPullbackPct = clamp(atrPct * 0.16, 0.08, 0.22)
+    const maxPullbackPct = clamp(atrPct * 0.55, 0.2, 0.75)
+    const anchorBufferPct = clamp(atrPct * 0.08, 0.04, 0.16)
+    const vwapAnchor =
+      hasVwap && vwap < currentPrice ? vwap * (1 + anchorBufferPct / 100) : null
+
+    let preferredEntry = currentPrice * (1 - minPullbackPct / 100)
+    if (Number.isFinite(vwapAnchor)) {
+      preferredEntry = Math.max(preferredEntry, vwapAnchor)
+    }
+    preferredEntry = Math.max(preferredEntry, currentPrice * (1 - maxPullbackPct / 100))
+
+    const minTickBelow = Math.max(currentPrice * 0.0002, 0.05)
+    preferredEntry = Math.min(preferredEntry, currentPrice - minTickBelow)
+
+    if (Number.isFinite(preferredEntry) && preferredEntry > 0) {
+      entryPrice = preferredEntry
+      if (!entryReason.includes('Limit preferred')) {
+        entryReason = `${entryReason} (Limit preferred, wait for pullback)`
+      }
+    }
+  }
+
   entryPrice = roundToPaise(Math.min(entryPrice, currentPrice))
 
   const minStopDistancePct = clamp(atrPct * 0.65, 0.45, 1.2)
