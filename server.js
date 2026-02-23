@@ -7,6 +7,8 @@ import tickerRouter from './routes/ticker.js';
 import marketRoutes from './routes/market.js';
 import intradayRouter from './routes/intraday.js';
 import swingRouter from './routes/swing.js';
+import { connectMongo } from './config/mongo.js';
+import { startIntradayAutoUploader } from './services/intradayAutoUploader.js';
 dotenv.config();
 
 const app = express();
@@ -58,6 +60,19 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
-app.listen(PORT, () => {
+await connectMongo();
+
+const server = app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
+  startIntradayAutoUploader({ port: PORT });
+});
+
+server.on('error', (error) => {
+  if (error?.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Stop the existing process or set a different PORT.`);
+    process.exit(1);
+  }
+
+  console.error('Server startup failed:', error);
+  process.exit(1);
 });
