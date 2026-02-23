@@ -9,11 +9,9 @@ import {
 import { computeRSI } from '../services/rsiCalculator.js';
 import { evaluateIntraday, calculateIntradayEntryPrice } from '../services/positionEvaluator.js';
 import {
-  saveIntradaySignalSnapshot,
-  listIntradaySignalSnapshots,
-  listIntradayBacktestRuns,
-  runIntradayBacktest
-} from '../services/intradayBacktestService.js';
+  saveIntradayPickEntries,
+  listIntradayPickEntries
+} from '../services/intradayPickStoreService.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
@@ -51,11 +49,11 @@ const intradayScanLimiter = createRateLimiter({
   keyFn: (req) => `${req.ip}:intraday:scan`,
   message: 'Too many intraday scan requests.'
 });
-const intradayBacktestLimiter = createRateLimiter({
-  windowMs: Number(process.env.INTRADAY_BACKTEST_RATE_LIMIT_WINDOW_MS || 60_000),
-  max: Number(process.env.INTRADAY_BACKTEST_RATE_LIMIT_MAX || 20),
-  keyFn: (req) => `${req.ip}:intraday:backtest`,
-  message: 'Too many intraday backtest requests.'
+const intradayEntriesLimiter = createRateLimiter({
+  windowMs: Number(process.env.INTRADAY_ENTRIES_RATE_LIMIT_WINDOW_MS || 60_000),
+  max: Number(process.env.INTRADAY_ENTRIES_RATE_LIMIT_MAX || 30),
+  keyFn: (req) => `${req.ip}:intraday:entries`,
+  message: 'Too many intraday entry requests.'
 });
 
 // 🗄️ Background scan cache
@@ -200,16 +198,9 @@ async function startIntradayBackgroundScan() {
     );
 
     try {
-      await saveIntradaySignalSnapshot({
+      await saveIntradayPickEntries({
         positiveStocks: intradayCache.results,
         totalScanned: results.length,
-        positiveCount: intradayCache.results.length,
-        rawPayload: {
-          positiveStocks: intradayCache.results,
-          totalScanned: results.length,
-          positiveCount: intradayCache.results.length,
-          compliance
-        },
         meta: {
           scanType: 'two-stage-institutional',
           institutionalFiltering: true,
@@ -217,7 +208,7 @@ async function startIntradayBackgroundScan() {
         }
       });
     } catch (persistErr) {
-      console.error('Failed to save intraday background snapshot:', persistErr.message || persistErr);
+      console.error('Failed to save intraday background pick entries:', persistErr.message || persistErr);
     }
 
     intradayCache.status = 'done';
@@ -254,64 +245,18 @@ router.get('/status', (req, res) => {
   });
 });
 
-router.get('/backtest/snapshots', intradayBacktestLimiter, async (req, res) => {
+router.get('/entries', intradayEntriesLimiter, async (req, res) => {
   try {
     const date = typeof req.query.date === 'string' ? req.query.date : undefined;
-    const limit = Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 50;
-    const snapshots = await listIntradaySignalSnapshots({ date, limit });
+    const limit = Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 200;
+    const entries = await listIntradayPickEntries({ date, limit });
     res.json({
-      snapshots,
-      count: snapshots.length,
+      entries,
+      count: entries.length,
       compliance
     });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch intraday signal snapshots' });
-  }
-});
-
-router.get('/backtest/runs', intradayBacktestLimiter, async (req, res) => {
-  try {
-    const date = typeof req.query.date === 'string' ? req.query.date : undefined;
-    const limit = Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 30;
-    const runs = await listIntradayBacktestRuns({ date, limit });
-    res.json({
-      runs,
-      count: runs.length,
-      compliance
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch intraday backtest runs' });
-  }
-});
-
-router.post('/backtest/run', intradayBacktestLimiter, async (req, res) => {
-  try {
-    const {
-      date,
-      capital,
-      allocationMode = 'per_pick',
-      snapshotMode = 'latest',
-      snapshotId,
-      requireExactSnapshot = false
-    } = req.body || {};
-
-    const run = await runIntradayBacktest({
-      date,
-      capital,
-      allocationMode,
-      snapshotMode,
-      snapshotId,
-      requireExactSnapshot: parseBooleanFlag(requireExactSnapshot, false)
-    });
-
-    res.json({
-      backtest: run,
-      compliance
-    });
-  } catch (error) {
-    const message = error?.message || 'Failed to run intraday backtest'
-    const status = /capital|snapshot|No intraday signal snapshots|No valid picks/.test(message) ? 400 : 500
-    res.status(status).json({ error: message });
+    res.status(500).json({ error: 'Failed to fetch intraday pick entries' });
   }
 });
 
@@ -339,13 +284,6 @@ function sanitizeRSIPeriod(input, fallback = 14) {
   if (asInt < 2) return 2;
   if (asInt > 50) return 50;
   return asInt;
-}
-
-function sanitizeSnapshotDateOverride(input) {
-  if (typeof input !== 'string') return null;
-  const value = input.trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
-  return value;
 }
 
 function parseBooleanFlag(input, fallback = false) {
@@ -396,18 +334,10 @@ router.post('/', intradayScanLimiter, async (req, res) => {
     symbols,
     rsiPeriod = 14,
     useTwoStageScan = true,
-    forceRunWhenClosed = false,
-    snapshotDateOverride
+    forceRunWhenClosed = false
   } = req.body || {};
   const effectiveRSIPeriod = sanitizeRSIPeriod(rsiPeriod, 14);
   const marketState = getIndianMarketState();
-  const normalizedSnapshotDateOverride = sanitizeSnapshotDateOverride(snapshotDateOverride);
-  const snapshotMarketState = normalizedSnapshotDateOverride
-    ? {
-        ...marketState,
-        istDate: normalizedSnapshotDateOverride
-      }
-    : marketState;
 
   if (!marketState.isOpen && !parseBooleanFlag(forceRunWhenClosed, false)) {
     return res.json({
@@ -604,39 +534,20 @@ router.post('/', intradayScanLimiter, async (req, res) => {
       return bScore - aScore;
     });
 
-    let snapshotId = null;
     try {
-      const snapshot = await saveIntradaySignalSnapshot({
+      await saveIntradayPickEntries({
         positiveStocks,
         totalScanned: results.length,
-        positiveCount: positiveStocks.length,
-        rawPayload: {
-          positiveStocks,
-          totalScanned: results.length,
-          positiveCount: positiveStocks.length,
-          compliance,
-          meta: {
-            rsiPeriod: effectiveRSIPeriod,
-            scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
-            stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
-            institutionalFiltering: true,
-            marketState,
-            snapshotDateOverride: normalizedSnapshotDateOverride,
-            snapshotDateUsed: snapshotMarketState.istDate
-          }
-        },
         meta: {
           rsiPeriod: effectiveRSIPeriod,
           scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
           stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
           institutionalFiltering: true,
-          marketState: snapshotMarketState,
-          snapshotDateOverride: normalizedSnapshotDateOverride
+          marketState
         }
       });
-      snapshotId = snapshot?.id || null;
     } catch (persistErr) {
-      console.error('Failed to save intraday snapshot:', persistErr.message || persistErr);
+      console.error('Failed to save intraday pick entries:', persistErr.message || persistErr);
     }
 
     res.json({
@@ -649,10 +560,7 @@ router.post('/', intradayScanLimiter, async (req, res) => {
         scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
         stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
         institutionalFiltering: true,
-        marketState,
-        snapshotDateOverride: normalizedSnapshotDateOverride,
-        snapshotDateUsed: snapshotMarketState.istDate,
-        snapshotId
+        marketState
       }
     });
   } catch (err) {
