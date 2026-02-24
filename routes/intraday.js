@@ -8,10 +8,6 @@ import {
 } from '../services/technicalIndicators.js';
 import { computeRSI } from '../services/rsiCalculator.js';
 import { evaluateIntraday, calculateIntradayEntryPrice } from '../services/positionEvaluator.js';
-import {
-  saveIntradayPickEntries,
-  listIntradayPickEntries
-} from '../services/intradayPickStoreService.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
@@ -48,12 +44,6 @@ const intradayScanLimiter = createRateLimiter({
   max: Number(process.env.INTRADAY_SCAN_RATE_LIMIT_MAX || 12),
   keyFn: (req) => `${req.ip}:intraday:scan`,
   message: 'Too many intraday scan requests.'
-});
-const intradayEntriesLimiter = createRateLimiter({
-  windowMs: Number(process.env.INTRADAY_ENTRIES_RATE_LIMIT_WINDOW_MS || 60_000),
-  max: Number(process.env.INTRADAY_ENTRIES_RATE_LIMIT_MAX || 30),
-  keyFn: (req) => `${req.ip}:intraday:entries`,
-  message: 'Too many intraday entry requests.'
 });
 
 // 🗄️ Background scan cache
@@ -197,16 +187,6 @@ async function startIntradayBackgroundScan() {
       parseFloat(r.riskReward) >= 1.0
     );
 
-    await saveIntradayPickEntries({
-      positiveStocks: intradayCache.results,
-      totalScanned: results.length,
-      meta: {
-        scanType: 'two-stage-institutional',
-        institutionalFiltering: true,
-        marketState: getIndianMarketState()
-      }
-    });
-
     intradayCache.status = 'done';
     intradayCache.updatedAt = Date.now();
     console.log(`✅ Background scan completed: ${intradayCache.results.length} positive stocks`);
@@ -239,21 +219,6 @@ router.get('/status', (req, res) => {
     ...intradayCache,
     compliance
   });
-});
-
-router.get('/entries', intradayEntriesLimiter, async (req, res) => {
-  try {
-    const date = typeof req.query.date === 'string' ? req.query.date : undefined;
-    const limit = Number.isFinite(Number(req.query.limit)) ? Number(req.query.limit) : 200;
-    const entries = await listIntradayPickEntries({ date, limit });
-    res.json({
-      entries,
-      count: entries.length,
-      compliance
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch intraday pick entries' });
-  }
 });
 
 function normalizeIndian(symbol) {
@@ -530,18 +495,6 @@ router.post('/', intradayScanLimiter, async (req, res) => {
       return bScore - aScore;
     });
 
-    const entryStore = await saveIntradayPickEntries({
-      positiveStocks,
-      totalScanned: results.length,
-      meta: {
-        rsiPeriod: effectiveRSIPeriod,
-        scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
-        stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
-        institutionalFiltering: true,
-        marketState
-      }
-    });
-
     res.json({
       positiveStocks,
       totalScanned: results.length,
@@ -552,8 +505,7 @@ router.post('/', intradayScanLimiter, async (req, res) => {
         scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
         stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
         institutionalFiltering: true,
-        marketState,
-        entryStore
+        marketState
       }
     });
   } catch (err) {

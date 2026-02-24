@@ -7,7 +7,6 @@ import tickerRouter from './routes/ticker.js';
 import marketRoutes from './routes/market.js';
 import intradayRouter from './routes/intraday.js';
 import swingRouter from './routes/swing.js';
-import { startIntradayAutoUploader } from './services/intradayAutoUploader.js';
 dotenv.config();
 
 const app = express();
@@ -61,7 +60,6 @@ app.use((err, req, res, next) => {
 
 const server = app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
-  startIntradayAutoUploader({ port: PORT });
 });
 
 server.on('error', (error) => {
