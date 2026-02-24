@@ -19,5 +19,8 @@ pnpm-debug.log*
 *.seed
 *.pid.lock
 
+# local fallback/debug data
+data/
+
 # misc
 .DS_Store

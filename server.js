@@ -7,7 +7,6 @@ import tickerRouter from './routes/ticker.js';
 import marketRoutes from './routes/market.js';
 import intradayRouter from './routes/intraday.js';
 import swingRouter from './routes/swing.js';
-import { connectMongo } from './config/mongo.js';
 import { startIntradayAutoUploader } from './services/intradayAutoUploader.js';
 dotenv.config();
 
@@ -59,8 +58,6 @@ app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal Server Error' });
 });
-
-await connectMongo();
 
 const server = app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);

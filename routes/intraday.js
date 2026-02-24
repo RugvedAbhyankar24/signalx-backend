@@ -197,19 +197,15 @@ async function startIntradayBackgroundScan() {
       parseFloat(r.riskReward) >= 1.0
     );
 
-    try {
-      await saveIntradayPickEntries({
-        positiveStocks: intradayCache.results,
-        totalScanned: results.length,
-        meta: {
-          scanType: 'two-stage-institutional',
-          institutionalFiltering: true,
-          marketState: getIndianMarketState()
-        }
-      });
-    } catch (persistErr) {
-      console.error('Failed to save intraday background pick entries:', persistErr.message || persistErr);
-    }
+    await saveIntradayPickEntries({
+      positiveStocks: intradayCache.results,
+      totalScanned: results.length,
+      meta: {
+        scanType: 'two-stage-institutional',
+        institutionalFiltering: true,
+        marketState: getIndianMarketState()
+      }
+    });
 
     intradayCache.status = 'done';
     intradayCache.updatedAt = Date.now();
@@ -534,21 +530,17 @@ router.post('/', intradayScanLimiter, async (req, res) => {
       return bScore - aScore;
     });
 
-    try {
-      await saveIntradayPickEntries({
-        positiveStocks,
-        totalScanned: results.length,
-        meta: {
-          rsiPeriod: effectiveRSIPeriod,
-          scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
-          stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
-          institutionalFiltering: true,
-          marketState
-        }
-      });
-    } catch (persistErr) {
-      console.error('Failed to save intraday pick entries:', persistErr.message || persistErr);
-    }
+    const entryStore = await saveIntradayPickEntries({
+      positiveStocks,
+      totalScanned: results.length,
+      meta: {
+        rsiPeriod: effectiveRSIPeriod,
+        scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
+        stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
+        institutionalFiltering: true,
+        marketState
+      }
+    });
 
     res.json({
       positiveStocks,
@@ -560,7 +552,8 @@ router.post('/', intradayScanLimiter, async (req, res) => {
         scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
         stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
         institutionalFiltering: true,
-        marketState
+        marketState,
+        entryStore
       }
     });
   } catch (err) {

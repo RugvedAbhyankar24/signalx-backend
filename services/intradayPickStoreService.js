@@ -1,8 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { isMongoConnected } from '../config/mongo.js';
-import { IntradayPickEntry } from '../models/IntradayPickEntry.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -92,13 +90,6 @@ function sanitizePickEntries({ positiveStocks, meta }) {
   return { scanId, entries };
 }
 
-async function persistEntriesFile(entries) {
-  const history = await readJson(PICK_HISTORY_FILE, { version: 1, entries: [] });
-  const existing = Array.isArray(history.entries) ? history.entries : [];
-  history.entries = [...entries, ...existing].slice(0, 5000);
-  await writeJson(PICK_HISTORY_FILE, history);
-}
-
 export async function saveIntradayPickEntries({ positiveStocks, totalScanned = 0, meta = {} }) {
   const marketState = meta?.marketState || {};
   if (marketState.isOpen !== true) {
@@ -120,24 +111,11 @@ export async function saveIntradayPickEntries({ positiveStocks, totalScanned = 0
     };
   }
 
-  if (isMongoConnected()) {
-    try {
-      await IntradayPickEntry.insertMany(
-        entries.map(entry => ({ ...entry, createdAt: new Date(entry.createdAt) })),
-        { ordered: false }
-      );
-      return {
-        scanId,
-        savedCount: entries.length,
-        totalScanned: Number(totalScanned) || 0,
-        skipped: false
-      };
-    } catch (error) {
-      console.error('Failed to save intraday pick entries to MongoDB, falling back to file:', error?.message || error);
-    }
-  }
+  const history = await readJson(PICK_HISTORY_FILE, { version: 1, entries: [] });
+  const existing = Array.isArray(history.entries) ? history.entries : [];
+  history.entries = [...entries, ...existing].slice(0, 10000);
+  await writeJson(PICK_HISTORY_FILE, history);
 
-  await persistEntriesFile(entries);
   return {
     scanId,
     savedCount: entries.length,
@@ -149,35 +127,6 @@ export async function saveIntradayPickEntries({ positiveStocks, totalScanned = 0
 export async function listIntradayPickEntries({ date, limit = 200 } = {}) {
   const normalizedLimit = Math.max(1, Math.min(1000, Number(limit) || 200));
   const normalizedDate = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null;
-
-  if (isMongoConnected()) {
-    try {
-      const query = normalizedDate ? { istDate: normalizedDate } : {};
-      const docs = await IntradayPickEntry.find(query)
-        .sort({ createdAt: -1 })
-        .limit(normalizedLimit)
-        .lean();
-      return docs.map(doc => ({
-        id: doc.id,
-        scanId: doc.scanId,
-        createdAt: new Date(doc.createdAt).toISOString(),
-        istDate: doc.istDate,
-        istTime: doc.istTime,
-        scanType: doc.scanType,
-        marketStateReason: doc.marketStateReason,
-        symbol: doc.symbol,
-        normalizedSymbol: doc.normalizedSymbol,
-        resolvedSymbol: doc.resolvedSymbol,
-        companyName: doc.companyName,
-        entryPrice: doc.entryPrice,
-        entryType: doc.entryType,
-        entryReason: doc.entryReason
-      }));
-    } catch (error) {
-      console.error('Failed to fetch intraday pick entries from MongoDB, falling back to file:', error?.message || error);
-    }
-  }
-
   const history = await readJson(PICK_HISTORY_FILE, { version: 1, entries: [] });
   let entries = Array.isArray(history.entries) ? history.entries : [];
   if (normalizedDate) entries = entries.filter(e => e?.istDate === normalizedDate);
