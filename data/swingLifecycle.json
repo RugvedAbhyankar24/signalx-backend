@@ -1,0 +1,137 @@
+{
+  "lastUpdatedDate": "2026-03-06",
+  "symbols": {
+    "GRSE": {
+      "symbol": "GRSE",
+      "companyName": "Garden Reach Shipbuilders & Engineers Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 2422,
+      "lastSeenQualityScore": 92,
+      "lastActionableCode": "immediate_entry",
+      "lastSetupStatus": "fresh_setup"
+    },
+    "LLOYDSME": {
+      "symbol": "LLOYDSME",
+      "companyName": "Lloyds Metals And Energy Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 1208.9,
+      "lastSeenQualityScore": 92,
+      "lastActionableCode": "immediate_entry",
+      "lastSetupStatus": "fresh_setup"
+    },
+    "TATAINVEST": {
+      "symbol": "TATAINVEST",
+      "companyName": "Tata Investment Corporation Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 660,
+      "lastSeenQualityScore": 89,
+      "lastActionableCode": "wait_pullback",
+      "lastSetupStatus": "active_setup"
+    },
+    "HFCL": {
+      "symbol": "HFCL",
+      "companyName": "HFCL Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 69.85,
+      "lastSeenQualityScore": 83,
+      "lastActionableCode": "avoid_chasing",
+      "lastSetupStatus": "extended_wait_pullback"
+    },
+    "PFC": {
+      "symbol": "PFC",
+      "companyName": "Power Finance Corporation Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 415.4,
+      "lastSeenQualityScore": 83,
+      "lastActionableCode": "avoid_chasing",
+      "lastSetupStatus": "extended_wait_pullback"
+    },
+    "COALINDIA": {
+      "symbol": "COALINDIA",
+      "companyName": "Coal India Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 448,
+      "lastSeenQualityScore": 80,
+      "lastActionableCode": "avoid_chasing",
+      "lastSetupStatus": "extended_wait_pullback"
+    },
+    "HINDALCO": {
+      "symbol": "HINDALCO",
+      "companyName": "Hindalco Industries Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 956.7,
+      "lastSeenQualityScore": 77,
+      "lastActionableCode": "wait_pullback",
+      "lastSetupStatus": "active_setup"
+    },
+    "NTPC": {
+      "symbol": "NTPC",
+      "companyName": "NTPC Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 377.45,
+      "lastSeenQualityScore": 77,
+      "lastActionableCode": "avoid_chasing",
+      "lastSetupStatus": "extended_wait_pullback"
+    },
+    "CUMMINSIND": {
+      "symbol": "CUMMINSIND",
+      "companyName": "Cummins India Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 4804.1,
+      "lastSeenQualityScore": 75,
+      "lastActionableCode": "avoid_chasing",
+      "lastSetupStatus": "extended_wait_pullback"
+    },
+    "RELIANCE": {
+      "symbol": "RELIANCE",
+      "companyName": "Reliance Industries Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 1386.4,
+      "lastSeenQualityScore": 59,
+      "lastActionableCode": "immediate_entry",
+      "lastSetupStatus": "emerging_setup"
+    },
+    "HINDPETRO": {
+      "symbol": "HINDPETRO",
+      "companyName": "Hindustan Petroleum Corporation Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 416.8,
+      "lastSeenQualityScore": 57,
+      "lastActionableCode": "immediate_entry",
+      "lastSetupStatus": "emerging_setup"
+    }
+  }
+}

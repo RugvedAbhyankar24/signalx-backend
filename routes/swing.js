@@ -10,6 +10,7 @@ import { computeRSI } from '../services/rsiCalculator.js';
 import { evaluateSwing, calculateSwingEntryPrice } from '../services/positionEvaluator.js';
 import { resolveNSESymbol } from '../services/marketData.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
+import { applySwingLifecycle } from '../services/swingLifecycleStore.js';
 
 const router = express.Router();
 const compliance = {
@@ -130,6 +131,7 @@ async function deepScanSwingSymbol(symbol) {
       entryPrice: swingEntryPriceData.entryPrice, stopLoss: swingEntryPriceData.stopLoss,
       target1: swingEntryPriceData.target1, target2: swingEntryPriceData.target2,
       entryReason: swingEntryPriceData.entryReason, entryType: swingEntryPriceData.entryType,
+      actionableEntryQuality: swingEntryPriceData.actionableEntryQuality,
       riskReward: swingEntryPriceData.riskReward,
       riskRewardAfterCosts: swingEntryPriceData.riskRewardAfterCosts,
       riskRewardGross: swingEntryPriceData.riskRewardGross,
@@ -160,7 +162,8 @@ async function startSwingBackgroundScan() {
     );
 
     const quality = buildQualitySwingList(results);
-    swingCache.results = quality.stocks;
+    const lifecycle = await applySwingLifecycle(quality.stocks);
+    swingCache.results = lifecycle.stocks;
 
     swingCache.status = 'done';
     swingCache.updatedAt = Date.now();
@@ -497,6 +500,7 @@ router.post('/', swingScanLimiter, async (req, res) => {
             target2: swingEntryPriceData.target2,
             entryReason: swingEntryPriceData.entryReason,
             entryType: swingEntryPriceData.entryType,
+            actionableEntryQuality: swingEntryPriceData.actionableEntryQuality,
             riskReward: swingEntryPriceData.riskReward,
             riskRewardAfterCosts: swingEntryPriceData.riskRewardAfterCosts,
             riskRewardGross: swingEntryPriceData.riskRewardGross,
@@ -513,7 +517,8 @@ router.post('/', swingScanLimiter, async (req, res) => {
     );
 
     const quality = buildQualitySwingList(results);
-    const positiveSwingStocks = quality.stocks;
+    const lifecycle = await applySwingLifecycle(quality.stocks);
+    const positiveSwingStocks = lifecycle.stocks;
 
     res.json({ 
       positiveSwingStocks,
@@ -527,7 +532,9 @@ router.post('/', swingScanLimiter, async (req, res) => {
         institutionalFiltering: true,
         riskRewardThreshold: '1:1 minimum',
         qualityMode: 'balanced-adaptive',
-        qualityScoreThreshold: quality.qualityThreshold
+        qualityScoreThreshold: quality.qualityThreshold,
+        swingLifecycleTracking: true,
+        tradeDate: lifecycle.tradeDate
       }
     });
   } catch (err) {

@@ -333,6 +333,127 @@ function roundToPaise(value) {
   return Math.round(value * 100) / 100
 }
 
+function buildActionableEntryQuality({
+  currentPrice,
+  entryPrice,
+  entryType,
+  riskRewardNet,
+  mode
+}) {
+  const price = Number(currentPrice)
+  const entry = Number(entryPrice)
+  const rr = Number(riskRewardNet)
+  const type = String(entryType || '')
+  const safeMode = mode === 'swing' ? 'swing' : 'intraday'
+
+  if (!Number.isFinite(price) || !Number.isFinite(entry) || entry <= 0 || type === 'invalid') {
+    return {
+      label: 'Avoid chasing',
+      code: 'avoid_chasing',
+      tone: 'negative',
+      reason: 'Entry structure is not reliable yet.'
+    }
+  }
+
+  if (type === 'scalp_only' || type === 'rr_weak') {
+    return {
+      label: 'Avoid chasing',
+      code: 'avoid_chasing',
+      tone: 'negative',
+      reason: type === 'rr_weak'
+        ? 'Risk-reward is weak at current location.'
+        : 'Move is already stretched; better not chase.'
+    }
+  }
+
+  const premiumPct = ((price - entry) / entry) * 100
+  const intradayPullbackTypes = new Set([
+    'vwap_pullback',
+    'trend_continuation',
+    'support_level',
+    'consolidation_level',
+    'volume_confirmed_level',
+    'market_level'
+  ])
+  const swingPullbackTypes = new Set([
+    'swing_vwap',
+    'swing_support'
+  ])
+  const swingContinuationTypes = new Set([
+    'swing_consolidation',
+    'swing_momentum',
+    'swing_market'
+  ])
+  const breakoutTypes = new Set([
+    'resistance_breakout',
+    'orb_breakout',
+    'swing_breakout'
+  ])
+
+  const rrImmediateFloor = safeMode === 'swing' ? 1.1 : 1.0
+  const rrWaitFloor = 1.0
+
+  let immediateThreshold
+  let waitThreshold
+
+  if (breakoutTypes.has(type)) {
+    immediateThreshold = safeMode === 'swing' ? 0.4 : 0.18
+    waitThreshold = safeMode === 'swing' ? 0.95 : 0.45
+  } else if (swingPullbackTypes.has(type)) {
+    immediateThreshold = 0.18
+    waitThreshold = 1.35
+  } else if (swingContinuationTypes.has(type)) {
+    immediateThreshold = 0.08
+    waitThreshold = 0.65
+  } else if (intradayPullbackTypes.has(type)) {
+    immediateThreshold = 0.08
+    waitThreshold = 0.45
+  } else {
+    immediateThreshold = safeMode === 'swing' ? 0.12 : 0.06
+    waitThreshold = safeMode === 'swing' ? 0.8 : 0.3
+  }
+
+  if (premiumPct <= immediateThreshold && (rr >= rrImmediateFloor || !Number.isFinite(rr))) {
+    return {
+      label: 'Best for immediate entry',
+      code: 'immediate_entry',
+      tone: 'positive',
+      reason: 'Price is still near the planned entry zone.'
+    }
+  }
+
+  const pullbackTypes = new Set([
+    ...intradayPullbackTypes,
+    ...swingPullbackTypes,
+    ...swingContinuationTypes
+  ])
+
+  if (pullbackTypes.has(type) && premiumPct > immediateThreshold && premiumPct <= waitThreshold && rr >= rrWaitFloor) {
+    return {
+      label: 'Wait for pullback',
+      code: 'wait_pullback',
+      tone: 'neutral',
+      reason: 'Setup is valid, but current price is above the preferred entry.'
+    }
+  }
+
+  if (breakoutTypes.has(type) && premiumPct <= waitThreshold && rr >= rrWaitFloor) {
+    return {
+      label: 'Wait for pullback',
+      code: 'wait_pullback',
+      tone: 'neutral',
+      reason: 'Breakout is valid, but current price is no longer at the clean trigger zone.'
+    }
+  }
+
+  return {
+    label: 'Avoid chasing',
+    code: 'avoid_chasing',
+    tone: 'negative',
+    reason: 'Price has moved too far from the planned entry zone.'
+  }
+}
+
 // TRUE BREAKOUT CONFIRMATION LOGIC
 function getBreakoutConfirmation(resistance, price, volumeSpike) {
   return (
@@ -438,6 +559,13 @@ export function calculateSwingEntryPrice({
       target2: null,
       entryReason: 'Invalid price data',
       entryType: 'invalid',
+      actionableEntryQuality: buildActionableEntryQuality({
+        currentPrice,
+        entryPrice: null,
+        entryType: 'invalid',
+        riskRewardNet: 0,
+        mode: 'swing'
+      }),
       riskReward: '0.00',
       riskRewardAfterCosts: '0.00',
       riskRewardGross: '0.00',
@@ -676,10 +804,6 @@ export function calculateSwingEntryPrice({
     target2 = target1 + Math.max(entryPrice * 0.0025, riskPerShare * 0.2)
   }
 
-  if (entryType !== 'swing_breakout' && entryPrice === currentPrice) {
-    entryReason += ' (Limit preferred, wait for pullback)'
-  }
-
   stopLoss = roundToPaise(stopLoss)
   target1 = roundToPaise(target1)
   target2 = roundToPaise(target2)
@@ -692,7 +816,14 @@ export function calculateSwingEntryPrice({
   })
   const rrGross = rrStats?.riskRewardGross ?? calculateRiskReward(entryPrice, stopLoss, target1)
   const rrNet = rrStats?.riskRewardAfterCosts ?? rrGross
-  
+  const actionableEntryQuality = buildActionableEntryQuality({
+    currentPrice,
+    entryPrice,
+    entryType,
+    riskRewardNet: rrNet,
+    mode: 'swing'
+  })
+
   return {
     entryPrice,
     stopLoss: Math.round(stopLoss * 100) / 100,
@@ -700,6 +831,7 @@ export function calculateSwingEntryPrice({
     target2: Math.round(target2 * 100) / 100,
     entryReason,
     entryType,
+    actionableEntryQuality,
     riskReward: formatRatio(rrNet),
     riskRewardAfterCosts: formatRatio(rrNet),
     riskRewardGross: formatRatio(rrGross),
@@ -736,6 +868,13 @@ export function calculateIntradayEntryPrice({
       target2: null,
       entryReason: 'Invalid price data',
       entryType: 'invalid',
+      actionableEntryQuality: buildActionableEntryQuality({
+        currentPrice,
+        entryPrice: null,
+        entryType: 'invalid',
+        riskRewardNet: 0,
+        mode: 'intraday'
+      }),
       riskReward: '0.00',
       riskRewardAfterCosts: '0.00',
       riskRewardGross: '0.00',
@@ -769,6 +908,13 @@ export function calculateIntradayEntryPrice({
       target2: roundToPaise(currentPrice * 1.018),
       entryReason: 'Stretch Zone – Scalp Only (Overextended VWAP)',
       entryType: 'scalp_only',
+      actionableEntryQuality: buildActionableEntryQuality({
+        currentPrice,
+        entryPrice: currentPrice,
+        entryType: 'scalp_only',
+        riskRewardNet: 0.6,
+        mode: 'intraday'
+      }),
       riskReward: '0.60',
       riskRewardAfterCosts: '0.60',
       riskRewardGross: '0.70',
@@ -858,9 +1004,6 @@ export function calculateIntradayEntryPrice({
 
     if (Number.isFinite(preferredEntry) && preferredEntry > 0) {
       entryPrice = preferredEntry
-      if (!entryReason.includes('Limit preferred')) {
-        entryReason = `${entryReason} (Limit preferred, wait for pullback)`
-      }
     }
   }
 
@@ -1007,6 +1150,13 @@ export function calculateIntradayEntryPrice({
   })
   const rrGross = rrStats?.riskRewardGross ?? calculateRiskReward(entryPrice, stopLoss, target1)
   const rrNet = rrStats?.riskRewardAfterCosts ?? rrGross
+  const actionableEntryQuality = buildActionableEntryQuality({
+    currentPrice,
+    entryPrice,
+    entryType,
+    riskRewardNet: rrNet,
+    mode: 'intraday'
+  })
   
   // 🛡️ INSTITUTIONAL GUARD: Check RR before returning
   if ((rrNet ?? 0) < 1) {
@@ -1015,8 +1165,15 @@ export function calculateIntradayEntryPrice({
       stopLoss: Math.round(stopLoss * 100) / 100,
       target1: Math.round(target1 * 100) / 100,
       target2: Math.round(target2 * 100) / 100,
-      entryReason: entryReason + ' (RR weak – wait for better location)',
+      entryReason,
       entryType: 'rr_weak',
+      actionableEntryQuality: buildActionableEntryQuality({
+        currentPrice,
+        entryPrice,
+        entryType: 'rr_weak',
+        riskRewardNet: rrNet,
+        mode: 'intraday'
+      }),
       riskReward: formatRatio(rrNet),
       riskRewardAfterCosts: formatRatio(rrNet),
       riskRewardGross: formatRatio(rrGross),
@@ -1034,6 +1191,7 @@ export function calculateIntradayEntryPrice({
     target2: Math.round(target2 * 100) / 100,
     entryReason,
     entryType,
+    actionableEntryQuality,
     riskReward: formatRatio(rrNet),
     riskRewardAfterCosts: formatRatio(rrNet),
     riskRewardGross: formatRatio(rrGross),
