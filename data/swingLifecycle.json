@@ -8,10 +8,10 @@
       "lastSeenDate": "2026-03-06",
       "timesSeen": 1,
       "tradingDaysActive": 1,
-      "lastSeenPrice": 2422,
-      "lastSeenQualityScore": 92,
-      "lastActionableCode": "immediate_entry",
-      "lastSetupStatus": "fresh_setup"
+      "lastSeenPrice": 2530,
+      "lastSeenQualityScore": 84,
+      "lastActionableCode": "avoid_chasing",
+      "lastSetupStatus": "extended_wait_pullback"
     },
     "LLOYDSME": {
       "symbol": "LLOYDSME",
@@ -132,6 +132,42 @@
       "lastSeenQualityScore": 57,
       "lastActionableCode": "immediate_entry",
       "lastSetupStatus": "emerging_setup"
+    },
+    "COCHINSHIP": {
+      "symbol": "COCHINSHIP",
+      "companyName": "Cochin Shipyard Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 1495,
+      "lastSeenQualityScore": 92,
+      "lastActionableCode": "wait_pullback",
+      "lastSetupStatus": "active_setup"
+    },
+    "UNITDSPR": {
+      "symbol": "UNITDSPR",
+      "companyName": "United Spirits Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 1390.9,
+      "lastSeenQualityScore": 88,
+      "lastActionableCode": "wait_pullback",
+      "lastSetupStatus": "active_setup"
+    },
+    "IRCON": {
+      "symbol": "IRCON",
+      "companyName": "Ircon International Limited",
+      "firstSeenDate": "2026-03-06",
+      "lastSeenDate": "2026-03-06",
+      "timesSeen": 1,
+      "tradingDaysActive": 1,
+      "lastSeenPrice": 146.58,
+      "lastSeenQualityScore": 62,
+      "lastActionableCode": "avoid_chasing",
+      "lastSetupStatus": "extended_wait_pullback"
     }
   }
 }

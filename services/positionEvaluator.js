@@ -338,13 +338,17 @@ function buildActionableEntryQuality({
   entryPrice,
   entryType,
   riskRewardNet,
-  mode
+  mode,
+  structureExtensionPct = null,
+  effectiveGapPct = null
 }) {
   const price = Number(currentPrice)
   const entry = Number(entryPrice)
   const rr = Number(riskRewardNet)
   const type = String(entryType || '')
   const safeMode = mode === 'swing' ? 'swing' : 'intraday'
+  const extensionPct = Number(structureExtensionPct)
+  const gapPct = Number(effectiveGapPct)
 
   if (!Number.isFinite(price) || !Number.isFinite(entry) || entry <= 0 || type === 'invalid') {
     return {
@@ -411,6 +415,46 @@ function buildActionableEntryQuality({
   } else {
     immediateThreshold = safeMode === 'swing' ? 0.12 : 0.06
     waitThreshold = safeMode === 'swing' ? 0.8 : 0.3
+  }
+
+  if (safeMode === 'swing') {
+    if (swingContinuationTypes.has(type)) {
+      if ((Number.isFinite(extensionPct) && extensionPct >= 2.2) || (Number.isFinite(gapPct) && gapPct >= 6.0)) {
+        return {
+          label: 'Avoid chasing',
+          code: 'avoid_chasing',
+          tone: 'negative',
+          reason: 'Continuation setup is too extended versus swing structure.'
+        }
+      }
+      if ((Number.isFinite(extensionPct) && extensionPct >= 1.2) || (Number.isFinite(gapPct) && gapPct >= 3.8)) {
+        return {
+          label: 'Wait for pullback',
+          code: 'wait_pullback',
+          tone: 'neutral',
+          reason: 'Continuation setup is valid, but extension above structure is elevated.'
+        }
+      }
+    }
+
+    if (swingPullbackTypes.has(type)) {
+      if (Number.isFinite(extensionPct) && extensionPct >= 2.8) {
+        return {
+          label: 'Avoid chasing',
+          code: 'avoid_chasing',
+          tone: 'negative',
+          reason: 'Pullback setup has already re-extended too far above swing structure.'
+        }
+      }
+      if (Number.isFinite(extensionPct) && extensionPct >= 1.8 && premiumPct > immediateThreshold) {
+        return {
+          label: 'Wait for pullback',
+          code: 'wait_pullback',
+          tone: 'neutral',
+          reason: 'Setup remains valid, but price is no longer near efficient pullback location.'
+        }
+      }
+    }
   }
 
   if (premiumPct <= immediateThreshold && (rr >= rrImmediateFloor || !Number.isFinite(rr))) {
@@ -564,7 +608,9 @@ export function calculateSwingEntryPrice({
         entryPrice: null,
         entryType: 'invalid',
         riskRewardNet: 0,
-        mode: 'swing'
+        mode: 'swing',
+        structureExtensionPct: null,
+        effectiveGapPct: null
       }),
       riskReward: '0.00',
       riskRewardAfterCosts: '0.00',
@@ -821,7 +867,9 @@ export function calculateSwingEntryPrice({
     entryPrice,
     entryType,
     riskRewardNet: rrNet,
-    mode: 'swing'
+    mode: 'swing',
+    structureExtensionPct: swingVWAPDistancePct,
+    effectiveGapPct: effectiveGap
   })
 
   return {
@@ -873,7 +921,9 @@ export function calculateIntradayEntryPrice({
         entryPrice: null,
         entryType: 'invalid',
         riskRewardNet: 0,
-        mode: 'intraday'
+        mode: 'intraday',
+        structureExtensionPct: null,
+        effectiveGapPct: gapOpenPct
       }),
       riskReward: '0.00',
       riskRewardAfterCosts: '0.00',
@@ -913,7 +963,9 @@ export function calculateIntradayEntryPrice({
         entryPrice: currentPrice,
         entryType: 'scalp_only',
         riskRewardNet: 0.6,
-        mode: 'intraday'
+        mode: 'intraday',
+        structureExtensionPct: hasVwap ? ((currentPrice - vwap) / vwap) * 100 : null,
+        effectiveGapPct: gapOpenPct
       }),
       riskReward: '0.60',
       riskRewardAfterCosts: '0.60',
@@ -1155,7 +1207,9 @@ export function calculateIntradayEntryPrice({
     entryPrice,
     entryType,
     riskRewardNet: rrNet,
-    mode: 'intraday'
+    mode: 'intraday',
+    structureExtensionPct: hasVwap ? ((currentPrice - vwap) / vwap) * 100 : null,
+    effectiveGapPct: gapOpenPct
   })
   
   // 🛡️ INSTITUTIONAL GUARD: Check RR before returning
@@ -1172,7 +1226,9 @@ export function calculateIntradayEntryPrice({
         entryPrice,
         entryType: 'rr_weak',
         riskRewardNet: rrNet,
-        mode: 'intraday'
+        mode: 'intraday',
+        structureExtensionPct: hasVwap ? ((currentPrice - vwap) / vwap) * 100 : null,
+        effectiveGapPct: gapOpenPct
       }),
       riskReward: formatRatio(rrNet),
       riskRewardAfterCosts: formatRatio(rrNet),
