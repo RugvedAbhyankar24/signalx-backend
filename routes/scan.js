@@ -3,8 +3,10 @@ import { fetchGapData, fetchOHLCV } from '../services/marketData.js';
 import {
   detectVolumeSpike,
   calculateVWAP,
+  calculateSwingVWAP,
   supportResistance,
-  detectBreakout
+  detectBreakout,
+  estimateATRPercent
 } from '../services/technicalIndicators.js';
 
 import { computeRSI, categorizeRSI } from '../services/rsiCalculator.js';
@@ -13,7 +15,9 @@ import { resolveNSESymbol } from '../services/marketData.js'
 import {
   evaluateSwing,
   evaluateLongTerm,
-  evaluateIntraday
+  evaluateIntraday,
+  calculateIntradayEntryPrice,
+  calculateSwingEntryPrice
 } from '../services/positionEvaluator.js'
 import { fetchFundamentals } from '../services/marketData.js'
 import { createRateLimiter } from '../middleware/rateLimit.js';
@@ -96,6 +100,22 @@ const fullScanLimiter = createRateLimiter({
   keyFn: (req) => `${req.ip}:full:scan`,
   message: 'Too many full scan requests.'
 });
+const IST_PARTS_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Kolkata',
+  weekday: 'short',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23'
+});
+const NSE_HOLIDAYS = new Set(
+  String(process.env.NSE_HOLIDAYS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
 
 function normalizeIndian(symbol) {
   if (!symbol) return symbol;
@@ -116,9 +136,69 @@ function sanitizeRSIPeriod(input, fallback = 14) {
   return asInt;
 }
 
+function getIndianMarketState(now = new Date()) {
+  const parts = IST_PARTS_FORMATTER.formatToParts(now);
+  const map = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  const weekday = map.weekday;
+  const year = Number(map.year);
+  const month = Number(map.month);
+  const day = Number(map.day);
+  const hour = Number(map.hour);
+  const minute = Number(map.minute);
+  const mins = hour * 60 + minute;
+  const isWeekend = weekday === 'Sat' || weekday === 'Sun';
+  const istDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  const isHoliday = NSE_HOLIDAYS.has(istDate);
+  const sessionOpen = 9 * 60 + 15;
+  const sessionClose = 15 * 60 + 30;
+  const isSessionTime = mins >= sessionOpen && mins <= sessionClose;
+  const isOpen = !isWeekend && !isHoliday && isSessionTime;
+
+  let reason = 'market_open';
+  if (isWeekend) reason = 'weekend';
+  else if (isHoliday) reason = 'holiday';
+  else if (mins < sessionOpen) reason = 'pre_open_or_before_session';
+  else if (mins > sessionClose) reason = 'post_market';
+
+  return {
+    isOpen,
+    reason,
+    istDate,
+    istTime: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+  };
+}
+
+function isFiniteOHLC(candle) {
+  const open = Number(candle?.open);
+  const high = Number(candle?.high);
+  const low = Number(candle?.low);
+  const close = Number(candle?.close);
+  return (
+    Number.isFinite(open) &&
+    Number.isFinite(high) &&
+    Number.isFinite(low) &&
+    Number.isFinite(close) &&
+    high >= low
+  );
+}
+
+function selectCandlesForTechnicals(candles, minCount = 20) {
+  if (!Array.isArray(candles) || candles.length === 0) return [];
+
+  const tradable = candles.filter(c => {
+    const volume = Number(c?.volume);
+    return isFiniteOHLC(c) && Number.isFinite(volume) && volume > 0;
+  });
+  if (tradable.length >= minCount) return tradable;
+
+  const priced = candles.filter(isFiniteOHLC);
+  return priced.length ? priced : [];
+}
+
 router.post('/', fullScanLimiter, async (req, res) => {
   const { symbols = [], gapThreshold = 0.8, rsiPeriod = 14 } = req.body || {};
   const effectiveRSIPeriod = sanitizeRSIPeriod(rsiPeriod, 14);
+  const marketState = getIndianMarketState();
 
   if (!Array.isArray(symbols) || symbols.length === 0) {
     return res.status(400).json({ error: 'symbols array is required' });
@@ -151,8 +231,9 @@ const gapData = await fetchGapData(resolvedSymbol)
           );
 
 
-          const closes = candles.map(c => c.close);
-          const lastCandle = candles[candles.length - 1];
+          const technicalCandles = selectCandlesForTechnicals(candles, Math.max(20, effectiveRSIPeriod + 1));
+          const closes = technicalCandles.map(c => c.close);
+          const lastCandle = technicalCandles[technicalCandles.length - 1] || candles[candles.length - 1];
 
           /* =====================
              RSI
@@ -175,9 +256,11 @@ const gapData = await fetchGapData(resolvedSymbol)
           /* =====================
              TECHNICALS
           ====================== */
-          const volumeData = detectVolumeSpike(candles);
-          const vwap = calculateVWAP(candles);
-          const { support, resistance } = supportResistance(candles);
+          const volumeData = detectVolumeSpike(technicalCandles);
+          const vwap = calculateVWAP(technicalCandles);
+          const swingVwap = calculateSwingVWAP(technicalCandles, 5);
+          const { support, resistance } = supportResistance(technicalCandles);
+          const volatilityPct = estimateATRPercent(technicalCandles, 14);
 
           const breakout =
             detectBreakout(gapData.currentPrice, resistance) ||
@@ -212,6 +295,18 @@ const gapData = await fetchGapData(resolvedSymbol)
             marketCap: gapData.marketCap
           });
 
+          const intradayEntryPlan = calculateIntradayEntryPrice({
+            price: gapData.currentPrice,
+            vwap,
+            support,
+            resistance,
+            rsi,
+            candleColor,
+            gapOpenPct: gapData.gapOpenPct,
+            volumeSpike: volumeData.volumeSpike,
+            volatilityPct: null
+          });
+
     /* =====================
    SWING & LONG TERM
 ===================== */
@@ -221,9 +316,23 @@ const swingView = evaluateSwing({
   gapNowPct: gapData.gapNowPct,
   volumeSpike: volumeData.volumeSpike,
   price: gapData.currentPrice,
-  swingVWAP: vwap,
+  swingVWAP: swingVwap,
   support,
   resistance
+})
+
+const swingEntryPlan = calculateSwingEntryPrice({
+  price: gapData.currentPrice,
+  marketCap: gapData.marketCap,
+  swingVWAP: swingVwap,
+  support,
+  resistance,
+  rsi,
+  candleColor,
+  gapOpenPct: gapData.gapOpenPct,
+  gapNowPct: gapData.gapNowPct,
+  volumeSpike: volumeData.volumeSpike,
+  volatilityPct
 })
 
 const fundamentals = await fetchFundamentals(resolvedSymbol)
@@ -260,6 +369,48 @@ const longTermView = evaluateLongTerm({
             gapNowPct: gapData.gapNowPct
           });
 
+          const newsItems = (news || []).slice(0, 5).map(n => ({
+            headline: n.headline,
+            url: n.url,
+            source: n.source,
+            datetime: n.datetime,
+            keywords: n.keywords
+          }));
+          const intradayOpportunity = marketState.isOpen && intradayView?.sentiment === 'positive'
+            ? {
+                qualifies: true,
+                entryPrice: intradayEntryPlan.entryPrice,
+                stopLoss: intradayEntryPlan.stopLoss,
+                target1: intradayEntryPlan.target1,
+                target2: intradayEntryPlan.target2,
+                entryType: intradayEntryPlan.entryType,
+                entryReason: intradayEntryPlan.entryReason,
+                actionableEntryQuality: intradayEntryPlan.actionableEntryQuality,
+                riskReward: intradayEntryPlan.riskReward
+              }
+            : {
+                qualifies: false,
+                reason: marketState.isOpen
+                  ? (intradayView?.reasons?.[0] || intradayView?.label || 'No intraday edge')
+                  : 'Intraday execution is only active during market hours.'
+              };
+          const swingOpportunity = swingView?.sentiment === 'positive'
+            ? {
+                qualifies: true,
+                entryPrice: swingEntryPlan.entryPrice,
+                stopLoss: swingEntryPlan.stopLoss,
+                target1: swingEntryPlan.target1,
+                target2: swingEntryPlan.target2,
+                entryType: swingEntryPlan.entryType,
+                entryReason: swingEntryPlan.entryReason,
+                actionableEntryQuality: swingEntryPlan.actionableEntryQuality,
+                riskReward: swingEntryPlan.riskReward
+              }
+            : {
+                qualifies: false,
+                reason: swingView?.reasons?.[0] || swingView?.label || 'No swing edge'
+              };
+
 
 
           /* =====================
@@ -286,6 +437,7 @@ const longTermView = evaluateLongTerm({
 
             volume: volumeData,
             vwap,
+            swingVwap,
             support,
             resistance,
             breakout,
@@ -300,21 +452,61 @@ const longTermView = evaluateLongTerm({
                 }
               : null,
 
-            newsItems: (news || []).slice(0, 5).map(n => ({
-              headline: n.headline,
-              url: n.url,
-              source: n.source,
-              datetime: n.datetime,
-              keywords: n.keywords
-            })),
+            newsItems,
             resolvedSymbol,
             newsSentiment: sentiment,
             finalSentiment: decision.sentiment,
             decision,
 
             intradayView,
+            intradayOpportunity,
             swingView,
-            longTermView
+            swingOpportunity,
+            longTermView,
+
+            marketData: {
+              prevClose: gapData.prevClose,
+              open: gapData.open,
+              currentPrice: gapData.currentPrice,
+              gapOpenPct: gapData.gapOpenPct,
+              gapNowPct: gapData.gapNowPct,
+              marketCap: gapData.marketCap ?? null,
+              priceSource: gapData.priceSource,
+              resolvedSymbol
+            },
+            technicals: {
+              rsi,
+              rsiCategory,
+              rsiBias,
+              candleColor,
+              volume: volumeData,
+              vwap,
+              swingVwap,
+              support,
+              resistance,
+              breakout
+            },
+            opportunities: {
+              decision,
+              intradayView,
+              intradayOpportunity,
+              swingView,
+              swingOpportunity,
+              longTermView
+            },
+            newsData: {
+              sentiment,
+              topNews: topNews
+                ? {
+                    headline: topNews.headline,
+                    summary: topNews.summary,
+                    url: topNews.url,
+                    source: topNews.source,
+                    keywords: topNews.keywords
+                  }
+                : null,
+              items: newsItems
+            }
           };
         } catch (e) {
           return {
@@ -325,7 +517,7 @@ const longTermView = evaluateLongTerm({
       })
     );
 
-    res.json({ results, compliance, meta: { gapThreshold, rsiPeriod: effectiveRSIPeriod } });
+    res.json({ results, compliance, meta: { gapThreshold, rsiPeriod: effectiveRSIPeriod, marketState } });
   } catch (err) {
     console.error('scan error', err);
     res.status(500).json({ error: 'Failed to scan symbols' });
