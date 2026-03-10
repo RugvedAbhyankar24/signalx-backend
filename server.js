@@ -11,6 +11,25 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const rawTrustProxy = process.env.TRUST_PROXY;
+
+function resolveTrustProxySetting(value) {
+  if (value == null || value === '') {
+    return process.env.NODE_ENV === 'production' ? 1 : false;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'false' || normalized === '0' || normalized === 'off') return false;
+  if (normalized === 'true') return 1;
+
+  const asNumber = Number(normalized);
+  if (Number.isFinite(asNumber) && asNumber >= 0) return asNumber;
+
+  return value;
+}
+
+app.set('trust proxy', resolveTrustProxySetting(rawTrustProxy));
+
 const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
