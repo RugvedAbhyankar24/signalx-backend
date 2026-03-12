@@ -1,6 +1,7 @@
 import express from 'express'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import { fetchGapData, fetchIndexOHLC, resolveNSESymbol } from '../services/marketData.js'
+import { getIntradayLeverageForSymbols } from '../services/leverageService.js'
 
 const router = express.Router()
 const resolvedSymbolCache = new Map()
@@ -10,6 +11,12 @@ const quotesLimiter = createRateLimiter({
   max: Number(process.env.QUOTE_RATE_LIMIT_MAX || 30),
   keyFn: (req) => `${req.ip}:market:quotes`,
   message: 'Too many quote refresh requests.',
+})
+const leverageLimiter = createRateLimiter({
+  windowMs: Number(process.env.LEVERAGE_RATE_LIMIT_WINDOW_MS || 15_000),
+  max: Number(process.env.LEVERAGE_RATE_LIMIT_MAX || 24),
+  keyFn: (req) => `${req.ip}:market:leverage`,
+  message: 'Too many leverage refresh requests.',
 })
 
 async function resolveCachedSymbol(symbol) {
@@ -94,6 +101,40 @@ router.post('/quotes', quotesLimiter, async (req, res) => {
   } catch (error) {
     console.error('quote refresh error', error)
     res.status(500).json({ error: 'Failed to refresh quotes' })
+  }
+})
+
+router.post('/leverage', leverageLimiter, async (req, res) => {
+  const inputSymbols = Array.isArray(req.body?.symbols) ? req.body.symbols : []
+  const symbols = Array.from(
+    new Set(
+      inputSymbols
+        .map((symbol) => String(symbol || '').trim().toUpperCase())
+        .filter(Boolean)
+    )
+  ).slice(0, 50)
+
+  if (symbols.length === 0) {
+    return res.status(400).json({ error: 'symbols array is required' })
+  }
+
+  try {
+    const leverageMap = await getIntradayLeverageForSymbols(symbols)
+    const results = symbols.map((symbol) => leverageMap.get(symbol) || {
+      symbol,
+      marginPct: 100,
+      leverageMultiplier: 1,
+      source: 'fallback',
+      asOf: new Date().toISOString(),
+    })
+
+    res.json({
+      results,
+      timestamp: new Date().toISOString(),
+    })
+  } catch (error) {
+    console.error('leverage refresh error', error)
+    res.status(500).json({ error: 'Failed to refresh leverage data' })
   }
 })
 
