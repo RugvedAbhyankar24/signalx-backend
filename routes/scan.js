@@ -294,6 +294,9 @@ const gapData = await fetchGapData(resolvedSymbol)
             candleColor,
             marketCap: gapData.marketCap
           });
+          const intradayDirection = intradayView?.tradeDirection === 'short' || intradayView?.sentiment === 'negative'
+            ? 'short'
+            : 'long'
 
           const intradayEntryPlan = calculateIntradayEntryPrice({
             price: gapData.currentPrice,
@@ -304,7 +307,8 @@ const gapData = await fetchGapData(resolvedSymbol)
             candleColor,
             gapOpenPct: gapData.gapOpenPct,
             volumeSpike: volumeData.volumeSpike,
-            volatilityPct: null
+            volatilityPct: null,
+            direction: intradayDirection
           });
 
     /* =====================
@@ -376,9 +380,13 @@ const longTermView = evaluateLongTerm({
             datetime: n.datetime,
             keywords: n.keywords
           }));
-          const intradayOpportunity = marketState.isOpen && intradayView?.sentiment === 'positive'
+          const intradayOpportunity = marketState.isOpen &&
+            ['positive', 'negative'].includes(intradayView?.sentiment) &&
+            !['scalp_only', 'rr_weak'].includes(intradayEntryPlan?.entryType) &&
+            Number.parseFloat(intradayEntryPlan?.riskReward) >= 1
             ? {
                 qualifies: true,
+                direction: intradayEntryPlan.direction || intradayDirection,
                 entryPrice: intradayEntryPlan.entryPrice,
                 stopLoss: intradayEntryPlan.stopLoss,
                 target1: intradayEntryPlan.target1,

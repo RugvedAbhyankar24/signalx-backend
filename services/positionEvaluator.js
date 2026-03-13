@@ -291,23 +291,29 @@ import { evaluateFundamentals } from './fundamentalAnalyzer.js'
 const DEFAULT_INTRADAY_ROUND_TRIP_COST_BPS = Number(process.env.INTRADAY_ROUND_TRIP_COST_BPS || 18)
 const DEFAULT_SWING_ROUND_TRIP_COST_BPS = Number(process.env.SWING_ROUND_TRIP_COST_BPS || 30)
 
-function calculateRiskReward(entryPrice, stopLoss, target1) {
-  const risk = entryPrice - stopLoss
-  const reward = target1 - entryPrice
+function calculateRiskReward(entryPrice, stopLoss, target1, direction = 'long') {
+  const safeDirection = direction === 'short' ? 'short' : 'long'
+  const risk = safeDirection === 'short' ? stopLoss - entryPrice : entryPrice - stopLoss
+  const reward = safeDirection === 'short' ? entryPrice - target1 : target1 - entryPrice
   if (!Number.isFinite(risk) || !Number.isFinite(reward) || risk <= 0) return null
   return reward / risk
 }
 
-function applyRoundTripCostModel({ entryPrice, stopLoss, target1, costBps }) {
+function applyRoundTripCostModel({ entryPrice, stopLoss, target1, costBps, direction = 'long' }) {
   if (!Number.isFinite(entryPrice) || entryPrice <= 0) return null
-  const rrGross = calculateRiskReward(entryPrice, stopLoss, target1)
+  const safeDirection = direction === 'short' ? 'short' : 'long'
+  const rrGross = calculateRiskReward(entryPrice, stopLoss, target1, safeDirection)
   if (rrGross == null) return null
 
   const effectiveCostBps = Number.isFinite(costBps) && costBps >= 0 ? costBps : 0
   const roundTripCostPerShare = entryPrice * (effectiveCostBps / 10000)
 
-  const grossRiskPerShare = Math.max(entryPrice - stopLoss, 0)
-  const grossRewardPerShare = Math.max(target1 - entryPrice, 0)
+  const grossRiskPerShare = safeDirection === 'short'
+    ? Math.max(stopLoss - entryPrice, 0)
+    : Math.max(entryPrice - stopLoss, 0)
+  const grossRewardPerShare = safeDirection === 'short'
+    ? Math.max(entryPrice - target1, 0)
+    : Math.max(target1 - entryPrice, 0)
   const netRiskPerShare = grossRiskPerShare + roundTripCostPerShare
   const netRewardPerShare = Math.max(grossRewardPerShare - roundTripCostPerShare, 0)
   const rrNet = netRiskPerShare > 0 ? netRewardPerShare / netRiskPerShare : null
@@ -339,6 +345,7 @@ function buildActionableEntryQuality({
   entryType,
   riskRewardNet,
   mode,
+  direction = 'long',
   structureExtensionPct = null,
   effectiveGapPct = null
 }) {
@@ -347,6 +354,7 @@ function buildActionableEntryQuality({
   const rr = Number(riskRewardNet)
   const type = String(entryType || '')
   const safeMode = mode === 'swing' ? 'swing' : 'intraday'
+  const safeDirection = direction === 'short' ? 'short' : 'long'
   const extensionPct = Number(structureExtensionPct)
   const gapPct = Number(effectiveGapPct)
 
@@ -370,14 +378,22 @@ function buildActionableEntryQuality({
     }
   }
 
-  const premiumPct = ((price - entry) / entry) * 100
+  const premiumPct = safeDirection === 'short'
+    ? ((entry - price) / entry) * 100
+    : ((price - entry) / entry) * 100
   const intradayPullbackTypes = new Set([
     'vwap_pullback',
     'trend_continuation',
     'support_level',
     'consolidation_level',
     'volume_confirmed_level',
-    'market_level'
+    'market_level',
+    'vwap_rejection_short',
+    'trend_continuation_short',
+    'resistance_rejection_short',
+    'consolidation_breakdown',
+    'volume_confirmed_short',
+    'market_level_short'
   ])
   const swingPullbackTypes = new Set([
     'swing_vwap',
@@ -477,7 +493,9 @@ function buildActionableEntryQuality({
       label: 'Wait for pullback',
       code: 'wait_pullback',
       tone: 'neutral',
-      reason: 'Setup is valid, but current price is above the preferred entry.'
+      reason: safeDirection === 'short'
+        ? 'Setup is valid, but current price is below the preferred short entry.'
+        : 'Setup is valid, but current price is above the preferred entry.'
     }
   }
 
@@ -504,6 +522,14 @@ function getBreakoutConfirmation(resistance, price, volumeSpike) {
     resistance &&
     price > resistance * 1.002 && // acceptance - 0.2% above resistance
     volumeSpike // must have volume confirmation
+  );
+}
+
+function getBreakdownConfirmation(support, price, volumeSpike) {
+  return (
+    support &&
+    price < support * 0.998 &&
+    volumeSpike
   );
 }
 
@@ -905,9 +931,11 @@ export function calculateIntradayEntryPrice({
   candleColor,
   gapOpenPct,
   volumeSpike,
-  volatilityPct
+  volatilityPct,
+  direction = 'long'
 }) {
   const currentPrice = Number(price)
+  const safeDirection = direction === 'short' ? 'short' : 'long'
   if (!Number.isFinite(currentPrice) || currentPrice <= 0) {
     return {
       entryPrice: null,
@@ -916,12 +944,14 @@ export function calculateIntradayEntryPrice({
       target2: null,
       entryReason: 'Invalid price data',
       entryType: 'invalid',
+      direction: safeDirection,
       actionableEntryQuality: buildActionableEntryQuality({
         currentPrice,
         entryPrice: null,
         entryType: 'invalid',
         riskRewardNet: 0,
         mode: 'intraday',
+        direction: safeDirection,
         structureExtensionPct: null,
         effectiveGapPct: gapOpenPct
       }),
@@ -937,34 +967,45 @@ export function calculateIntradayEntryPrice({
   const validSupport = Number.isFinite(support) && support > 0 ? support : null
   const validResistance = Number.isFinite(resistance) && resistance > 0 ? resistance : null
   const normalizedRSI = Number.isFinite(rsi) ? rsi : 50
-  const atrPct = clamp(
-    Number.isFinite(volatilityPct) ? volatilityPct : 1.1,
-    0.45,
-    3.8
-  )
+  const atrPct = clamp(Number.isFinite(volatilityPct) ? volatilityPct : 1.1, 0.45, 3.8)
   const atrMove = currentPrice * (atrPct / 100)
+  const structureExtensionPct = hasVwap
+    ? (safeDirection === 'short' ? ((vwap - currentPrice) / vwap) * 100 : ((currentPrice - vwap) / vwap) * 100)
+    : null
 
   let entryPrice = currentPrice
-  let entryReason = 'Market level entry - immediate execution'
-  let entryType = 'market_level'
+  let entryReason = safeDirection === 'short'
+    ? 'Market level short entry - immediate execution'
+    : 'Market level entry - immediate execution'
+  let entryType = safeDirection === 'short' ? 'market_level_short' : 'market_level'
 
-  const vwapExtension = hasVwap ? (currentPrice - vwap) / vwap : 0
+  const vwapExtension = hasVwap
+    ? (safeDirection === 'short' ? (vwap - currentPrice) / vwap : (currentPrice - vwap) / vwap)
+    : 0
   const extensionLimit = clamp((atrPct * 1.8) / 100, 0.03, 0.055)
-  if (vwapExtension > extensionLimit && !volumeSpike && normalizedRSI > 60) {
+  if (
+    vwapExtension > extensionLimit &&
+    !volumeSpike &&
+    (safeDirection === 'short' ? normalizedRSI < 40 : normalizedRSI > 60)
+  ) {
     return {
       entryPrice: roundToPaise(currentPrice),
-      stopLoss: roundToPaise(currentPrice * 0.988),
-      target1: roundToPaise(currentPrice * 1.01),
-      target2: roundToPaise(currentPrice * 1.018),
-      entryReason: 'Stretch Zone – Scalp Only (Overextended VWAP)',
+      stopLoss: roundToPaise(safeDirection === 'short' ? currentPrice * 1.012 : currentPrice * 0.988),
+      target1: roundToPaise(safeDirection === 'short' ? currentPrice * 0.99 : currentPrice * 1.01),
+      target2: roundToPaise(safeDirection === 'short' ? currentPrice * 0.982 : currentPrice * 1.018),
+      entryReason: safeDirection === 'short'
+        ? 'Capitulation Zone – Scalp Only (Overextended below VWAP)'
+        : 'Stretch Zone – Scalp Only (Overextended VWAP)',
       entryType: 'scalp_only',
+      direction: safeDirection,
       actionableEntryQuality: buildActionableEntryQuality({
         currentPrice,
         entryPrice: currentPrice,
         entryType: 'scalp_only',
         riskRewardNet: 0.6,
         mode: 'intraday',
-        structureExtensionPct: hasVwap ? ((currentPrice - vwap) / vwap) * 100 : null,
+        direction: safeDirection,
+        structureExtensionPct,
         effectiveGapPct: gapOpenPct
       }),
       riskReward: '0.60',
@@ -974,14 +1015,67 @@ export function calculateIntradayEntryPrice({
       estimatedRoundTripCostPct: DEFAULT_INTRADAY_ROUND_TRIP_COST_BPS / 100
     }
   }
-  const vwapDistancePct =
-    hasVwap ? ((currentPrice - vwap) / vwap) * 100 : null
+
+  const vwapDistancePct = structureExtensionPct
   const supportDistancePct =
     validSupport && validSupport < currentPrice
       ? ((currentPrice - validSupport) / currentPrice) * 100
       : null
+  const resistanceDistancePct =
+    validResistance && validResistance > currentPrice
+      ? ((validResistance - currentPrice) / currentPrice) * 100
+      : null
 
-  if (hasVwap && currentPrice > vwap && normalizedRSI >= 42 && normalizedRSI <= 80) {
+  if (safeDirection === 'short') {
+    if (hasVwap && currentPrice < vwap && normalizedRSI >= 20 && normalizedRSI <= 58) {
+      const nearVWAPPct = clamp(atrPct * 1.1, 0.45, 2.1)
+      if (Number.isFinite(vwapDistancePct) && vwapDistancePct <= nearVWAPPct) {
+        const entryBufferPct = clamp(atrPct * 0.12, 0.05, 0.18)
+        entryPrice = Math.max(currentPrice, vwap * (1 - entryBufferPct / 100))
+        entryReason = `VWAP rejection short - ${vwapDistancePct.toFixed(1)}% below VWAP`
+        entryType = 'vwap_rejection_short'
+      } else {
+        entryPrice = currentPrice
+        entryReason = `Downtrend continuation - ${vwapDistancePct?.toFixed(1) ?? '0.0'}% below VWAP`
+        entryType = 'trend_continuation_short'
+      }
+    } else if (
+      validResistance &&
+      validResistance > currentPrice &&
+      Number.isFinite(resistanceDistancePct) &&
+      resistanceDistancePct <= clamp(atrPct * 1.1, 0.8, 2.5) &&
+      normalizedRSI >= 38 &&
+      normalizedRSI <= 65
+    ) {
+      const entryBufferPct = clamp(atrPct * 0.09, 0.05, 0.16)
+      entryPrice = Math.max(currentPrice, validResistance * (1 - entryBufferPct / 100))
+      entryReason = `Resistance rejection short - ${resistanceDistancePct.toFixed(1)}% below resistance`
+      entryType = 'resistance_rejection_short'
+    } else if (
+      validSupport &&
+      currentPrice <= validSupport * 1.002 &&
+      normalizedRSI >= 28 &&
+      normalizedRSI <= 55 &&
+      (volumeSpike || candleColor === 'red')
+    ) {
+      const breakdownBufferPct = clamp(atrPct * 0.08, 0.04, 0.14)
+      entryPrice = Math.max(currentPrice, validSupport * (1 - breakdownBufferPct / 100))
+      entryReason = 'Support breakdown - institutional sell-side confirmation'
+      entryType = 'support_breakdown'
+    } else if ((gapOpenPct ?? 0) < -0.8 && (gapOpenPct ?? 0) > -4.5 && candleColor === 'red') {
+      entryPrice = currentPrice
+      entryReason = `ORB downside continuation - ${Math.abs(gapOpenPct ?? 0).toFixed(1)}% opening gap down`
+      entryType = 'orb_breakdown'
+    } else if (normalizedRSI >= 35 && normalizedRSI <= 55 && Math.abs(gapOpenPct ?? 0) <= 0.6) {
+      entryPrice = currentPrice
+      entryReason = `Consolidation breakdown - RSI ${normalizedRSI.toFixed(1)} zone`
+      entryType = 'consolidation_breakdown'
+    } else if (normalizedRSI >= 30 && normalizedRSI <= 58) {
+      entryPrice = currentPrice
+      entryReason = `Volume confirmed sell-side pressure - RSI ${normalizedRSI.toFixed(1)}`
+      entryType = 'volume_confirmed_short'
+    }
+  } else if (hasVwap && currentPrice > vwap && normalizedRSI >= 42 && normalizedRSI <= 80) {
     const nearVWAPPct = clamp(atrPct * 1.1, 0.45, 2.1)
     if (Number.isFinite(vwapDistancePct) && vwapDistancePct <= nearVWAPPct) {
       const entryBufferPct = clamp(atrPct * 0.12, 0.05, 0.18)
@@ -1030,40 +1124,36 @@ export function calculateIntradayEntryPrice({
     entryType = 'volume_confirmed_level'
   }
 
-  const pullbackPreferredEntryTypes = new Set([
-    'vwap_pullback',
-    'trend_continuation',
-    'support_level',
-    'consolidation_level',
-    'volume_confirmed_level',
-    'market_level'
-  ])
+  const pullbackPreferredEntryTypes = safeDirection === 'short'
+    ? new Set(['vwap_rejection_short', 'trend_continuation_short', 'resistance_rejection_short', 'consolidation_breakdown', 'volume_confirmed_short', 'market_level_short'])
+    : new Set(['vwap_pullback', 'trend_continuation', 'support_level', 'consolidation_level', 'volume_confirmed_level', 'market_level'])
   if (pullbackPreferredEntryTypes.has(entryType)) {
     const minPullbackPct = clamp(atrPct * 0.16, 0.08, 0.22)
     const maxPullbackPct = clamp(atrPct * 0.55, 0.2, 0.75)
     const anchorBufferPct = clamp(atrPct * 0.08, 0.04, 0.16)
-    const vwapAnchor =
-      hasVwap && vwap < currentPrice ? vwap * (1 + anchorBufferPct / 100) : null
 
-    let preferredEntry = currentPrice * (1 - minPullbackPct / 100)
-    if (Number.isFinite(vwapAnchor)) {
-      preferredEntry = Math.max(preferredEntry, vwapAnchor)
+    let preferredEntry
+    if (safeDirection === 'short') {
+      const vwapAnchor = hasVwap && vwap > currentPrice ? vwap * (1 - anchorBufferPct / 100) : null
+      preferredEntry = currentPrice * (1 + minPullbackPct / 100)
+      if (Number.isFinite(vwapAnchor)) preferredEntry = Math.max(preferredEntry, vwapAnchor)
+      preferredEntry = Math.min(preferredEntry, currentPrice * (1 + maxPullbackPct / 100))
+      preferredEntry = Math.max(preferredEntry, currentPrice + Math.max(currentPrice * 0.0002, 0.05))
+    } else {
+      const vwapAnchor = hasVwap && vwap < currentPrice ? vwap * (1 + anchorBufferPct / 100) : null
+      preferredEntry = currentPrice * (1 - minPullbackPct / 100)
+      if (Number.isFinite(vwapAnchor)) preferredEntry = Math.max(preferredEntry, vwapAnchor)
+      preferredEntry = Math.max(preferredEntry, currentPrice * (1 - maxPullbackPct / 100))
+      preferredEntry = Math.min(preferredEntry, currentPrice - Math.max(currentPrice * 0.0002, 0.05))
     }
-    preferredEntry = Math.max(preferredEntry, currentPrice * (1 - maxPullbackPct / 100))
 
-    const minTickBelow = Math.max(currentPrice * 0.0002, 0.05)
-    preferredEntry = Math.min(preferredEntry, currentPrice - minTickBelow)
-
-    if (Number.isFinite(preferredEntry) && preferredEntry > 0) {
-      entryPrice = preferredEntry
-    }
+    if (Number.isFinite(preferredEntry) && preferredEntry > 0) entryPrice = preferredEntry
   }
 
-  entryPrice = roundToPaise(Math.min(entryPrice, currentPrice))
+  entryPrice = roundToPaise(safeDirection === 'short' ? Math.max(entryPrice, currentPrice) : Math.min(entryPrice, currentPrice))
 
   const minStopDistancePct = clamp(atrPct * 0.65, 0.45, 1.2)
   const maxStopDistancePct = clamp(atrPct * 1.7, 1.0, 2.8)
-
   const stopAtrMultipleByType = {
     vwap_pullback: 0.85,
     trend_continuation: 1.05,
@@ -1072,41 +1162,55 @@ export function calculateIntradayEntryPrice({
     orb_breakout: 1.2,
     consolidation_level: 0.95,
     volume_confirmed_level: 1.0,
-    market_level: 1.0
+    market_level: 1.0,
+    vwap_rejection_short: 0.9,
+    trend_continuation_short: 1.05,
+    resistance_rejection_short: 1.0,
+    support_breakdown: 1.15,
+    orb_breakdown: 1.2,
+    consolidation_breakdown: 0.95,
+    volume_confirmed_short: 1.0,
+    market_level_short: 1.0
   }
   const stopAtrMultiple = stopAtrMultipleByType[entryType] ?? 1.0
   const atrStopPct = clamp(atrPct * stopAtrMultiple, minStopDistancePct, maxStopDistancePct)
-  const atrStop = entryPrice * (1 - atrStopPct / 100)
+  const atrStop = safeDirection === 'short'
+    ? entryPrice * (1 + atrStopPct / 100)
+    : entryPrice * (1 - atrStopPct / 100)
 
   const structureStops = []
-  if (
-    hasVwap &&
-    vwap < entryPrice &&
-    ((entryPrice - vwap) / entryPrice) * 100 <= Math.max(atrPct * 2.2, 1.6)
-  ) {
-    structureStops.push(vwap - atrMove * 0.25)
-  }
-  if (
-    validSupport &&
-    validSupport < entryPrice &&
-    ((entryPrice - validSupport) / entryPrice) * 100 <= Math.max(atrPct * 2.6, 2.0)
-  ) {
-    structureStops.push(validSupport - atrMove * 0.2)
+  if (safeDirection === 'short') {
+    if (hasVwap && vwap > entryPrice && ((vwap - entryPrice) / entryPrice) * 100 <= Math.max(atrPct * 2.2, 1.6)) {
+      structureStops.push(vwap + atrMove * 0.25)
+    }
+    if (validResistance && validResistance > entryPrice && ((validResistance - entryPrice) / entryPrice) * 100 <= Math.max(atrPct * 2.6, 2.0)) {
+      structureStops.push(validResistance + atrMove * 0.2)
+    }
+  } else {
+    if (hasVwap && vwap < entryPrice && ((entryPrice - vwap) / entryPrice) * 100 <= Math.max(atrPct * 2.2, 1.6)) {
+      structureStops.push(vwap - atrMove * 0.25)
+    }
+    if (validSupport && validSupport < entryPrice && ((entryPrice - validSupport) / entryPrice) * 100 <= Math.max(atrPct * 2.6, 2.0)) {
+      structureStops.push(validSupport - atrMove * 0.2)
+    }
   }
 
-  let stopLoss = structureStops.length ? Math.max(...structureStops) : atrStop
-  const nearestAllowedStop = entryPrice * (1 - minStopDistancePct / 100)
-  const farthestAllowedStop = entryPrice * (1 - maxStopDistancePct / 100)
-  stopLoss = Math.min(stopLoss, nearestAllowedStop)
-  stopLoss = Math.max(stopLoss, farthestAllowedStop)
+  let stopLoss = structureStops.length
+    ? (safeDirection === 'short' ? Math.min(...structureStops) : Math.max(...structureStops))
+    : atrStop
+  if (safeDirection === 'short') {
+    stopLoss = Math.max(stopLoss, entryPrice * (1 + minStopDistancePct / 100))
+    stopLoss = Math.min(stopLoss, entryPrice * (1 + maxStopDistancePct / 100))
+  } else {
+    stopLoss = Math.min(stopLoss, entryPrice * (1 - minStopDistancePct / 100))
+    stopLoss = Math.max(stopLoss, entryPrice * (1 - maxStopDistancePct / 100))
+  }
 
-  let riskPerShare = entryPrice - stopLoss
-  const minRiskPct = clamp(atrPct * 0.6, 0.35, 1.1)
-  const maxRiskPct = clamp(atrPct * 1.9, 1.2, 3.0)
-  const minRiskPerShare = entryPrice * (minRiskPct / 100)
-  const maxRiskPerShare = entryPrice * (maxRiskPct / 100)
+  let riskPerShare = safeDirection === 'short' ? stopLoss - entryPrice : entryPrice - stopLoss
+  const minRiskPerShare = entryPrice * (clamp(atrPct * 0.6, 0.35, 1.1) / 100)
+  const maxRiskPerShare = entryPrice * (clamp(atrPct * 1.9, 1.2, 3.0) / 100)
   riskPerShare = clamp(riskPerShare, minRiskPerShare, maxRiskPerShare)
-  stopLoss = entryPrice - riskPerShare
+  stopLoss = safeDirection === 'short' ? entryPrice + riskPerShare : entryPrice - riskPerShare
 
   let rr1Base = {
     vwap_pullback: 1.6,
@@ -1116,78 +1220,119 @@ export function calculateIntradayEntryPrice({
     orb_breakout: 1.4,
     consolidation_level: 1.45,
     volume_confirmed_level: 1.4,
-    market_level: 1.35
+    market_level: 1.35,
+    vwap_rejection_short: 1.6,
+    trend_continuation_short: 1.35,
+    resistance_rejection_short: 1.75,
+    support_breakdown: 1.5,
+    orb_breakdown: 1.4,
+    consolidation_breakdown: 1.45,
+    volume_confirmed_short: 1.4,
+    market_level_short: 1.35
   }[entryType] ?? 1.35
 
-  if (normalizedRSI >= 63) rr1Base -= 0.15
+  if (safeDirection === 'short') {
+    if (normalizedRSI <= 32) rr1Base -= 0.15
+    else if (normalizedRSI >= 52) rr1Base += 0.12
+  } else if (normalizedRSI >= 63) rr1Base -= 0.15
   else if (normalizedRSI <= 48) rr1Base += 0.12
 
   if (atrPct >= 2.0) rr1Base -= 0.08
   else if (atrPct <= 0.8) rr1Base += 0.08
-
   if (volumeSpike) rr1Base += 0.05
 
   const rr1 = clamp(rr1Base, 1.2, 2.1)
   const rr2 = clamp(rr1 + Math.max(rr1 * 0.75, 0.8), 2.0, 3.6)
 
-  let target1 = entryPrice + riskPerShare * rr1
-  let target1CappedByResistance = false
-  if (validResistance && validResistance > entryPrice) {
-    const resistanceBufferPct = clamp(atrPct * 0.15, 0.08, 0.35)
-    const resistanceCap = validResistance * (1 - resistanceBufferPct / 100)
+  let target1 = safeDirection === 'short' ? entryPrice - riskPerShare * rr1 : entryPrice + riskPerShare * rr1
+  let target1CappedByStructure = false
+  if (safeDirection === 'short') {
+    if (validSupport && validSupport < entryPrice) {
+      const supportCap = validSupport * (1 + clamp(atrPct * 0.15, 0.08, 0.35) / 100)
+      if (supportCap < entryPrice - riskPerShare * 0.9) {
+        const previousTarget1 = target1
+        target1 = Math.max(target1, supportCap)
+        if (target1 > previousTarget1) target1CappedByStructure = true
+      }
+    }
+  } else if (validResistance && validResistance > entryPrice) {
+    const resistanceCap = validResistance * (1 - clamp(atrPct * 0.15, 0.08, 0.35) / 100)
     if (resistanceCap > entryPrice + riskPerShare * 0.9) {
       const previousTarget1 = target1
       target1 = Math.min(target1, resistanceCap)
-      if (target1 < previousTarget1) target1CappedByResistance = true
+      if (target1 < previousTarget1) target1CappedByStructure = true
     }
   }
 
-  let target2 = entryPrice + riskPerShare * rr2
+  let target2 = safeDirection === 'short' ? entryPrice - riskPerShare * rr2 : entryPrice + riskPerShare * rr2
   const minTarget2Step = Math.max(riskPerShare * 0.6, entryPrice * 0.004)
-  target2 = Math.max(target2, target1 + minTarget2Step)
-  if (validResistance && validResistance > entryPrice && target2 <= validResistance) {
+  target2 = safeDirection === 'short' ? Math.min(target2, target1 - minTarget2Step) : Math.max(target2, target1 + minTarget2Step)
+  if (safeDirection === 'short') {
+    if (validSupport && validSupport < entryPrice && target2 >= validSupport) {
+      target2 = validSupport - atrMove * 0.8
+    }
+  } else if (validResistance && validResistance > entryPrice && target2 <= validResistance) {
     target2 = validResistance + atrMove * 0.8
   }
 
-  // Universal realism rule for intraday runners:
-  // if T1 is resistance-capped (and setup is not a breakout), keep T2 tightly controlled.
   if (
-    target1CappedByResistance &&
-    validResistance &&
-    entryType !== 'resistance_breakout' &&
-    entryType !== 'orb_breakout'
+    target1CappedByStructure &&
+    (safeDirection === 'short' ? validSupport : validResistance) &&
+    !['resistance_breakout', 'orb_breakout', 'support_breakdown', 'orb_breakdown'].includes(entryType)
   ) {
-    let postResistanceAtrMult = {
+    let postStructureAtrMult = {
       vwap_pullback: 0.5,
       trend_continuation: 0.55,
       support_level: 0.65,
       consolidation_level: 0.45,
       volume_confirmed_level: 0.5,
-      market_level: 0.45
+      market_level: 0.45,
+      vwap_rejection_short: 0.5,
+      trend_continuation_short: 0.55,
+      resistance_rejection_short: 0.65,
+      consolidation_breakdown: 0.45,
+      volume_confirmed_short: 0.5,
+      market_level_short: 0.45
     }[entryType] ?? 0.5
 
-    postResistanceAtrMult += clamp((atrPct - 1.2) * 0.08, -0.08, 0.2)
-    if (volumeSpike) postResistanceAtrMult += 0.05
-    if (normalizedRSI >= 62) postResistanceAtrMult -= 0.05
-    postResistanceAtrMult = clamp(postResistanceAtrMult, 0.35, 0.9)
+    postStructureAtrMult += clamp((atrPct - 1.2) * 0.08, -0.08, 0.2)
+    if (volumeSpike) postStructureAtrMult += 0.05
+    if ((safeDirection === 'short' && normalizedRSI <= 38) || (safeDirection !== 'short' && normalizedRSI >= 62)) {
+      postStructureAtrMult -= 0.05
+    }
+    postStructureAtrMult = clamp(postStructureAtrMult, 0.35, 0.9)
 
-    const atrBasedRunnerCap = validResistance + atrMove * postResistanceAtrMult
-    const pctBasedRunnerCap = validResistance * (1 + clamp(atrPct * 0.25, 0.25, 0.9) / 100)
-    const tightRunnerCap = Math.min(atrBasedRunnerCap, pctBasedRunnerCap)
-
-    if (tightRunnerCap > target1) {
-      target2 = Math.min(target2, tightRunnerCap)
-
-      let minRunnerStep = Math.max(entryPrice * 0.001, riskPerShare * 0.15)
-      if (target1 + minRunnerStep > tightRunnerCap) {
-        minRunnerStep = Math.max(entryPrice * 0.0005, riskPerShare * 0.08)
+    if (safeDirection === 'short') {
+      const tightRunnerCap = Math.max(
+        validSupport - atrMove * postStructureAtrMult,
+        validSupport * (1 - clamp(atrPct * 0.25, 0.25, 0.9) / 100)
+      )
+      if (tightRunnerCap < target1) {
+        target2 = Math.max(target2, tightRunnerCap)
+        let minRunnerStep = Math.max(entryPrice * 0.001, riskPerShare * 0.15)
+        if (target1 - minRunnerStep < tightRunnerCap) minRunnerStep = Math.max(entryPrice * 0.0005, riskPerShare * 0.08)
+        target2 = Math.min(target2, target1 - minRunnerStep)
+        target2 = Math.max(target2, tightRunnerCap)
       }
-      target2 = Math.max(target2, target1 + minRunnerStep)
-      target2 = Math.min(target2, tightRunnerCap)
+    } else {
+      const tightRunnerCap = Math.min(
+        validResistance + atrMove * postStructureAtrMult,
+        validResistance * (1 + clamp(atrPct * 0.25, 0.25, 0.9) / 100)
+      )
+      if (tightRunnerCap > target1) {
+        target2 = Math.min(target2, tightRunnerCap)
+        let minRunnerStep = Math.max(entryPrice * 0.001, riskPerShare * 0.15)
+        if (target1 + minRunnerStep > tightRunnerCap) minRunnerStep = Math.max(entryPrice * 0.0005, riskPerShare * 0.08)
+        target2 = Math.max(target2, target1 + minRunnerStep)
+        target2 = Math.min(target2, tightRunnerCap)
+      }
     }
   }
-  if (target2 <= target1) {
-    target2 = target1 + Math.max(entryPrice * 0.0005, riskPerShare * 0.08)
+
+  if ((safeDirection === 'short' && target2 >= target1) || (safeDirection !== 'short' && target2 <= target1)) {
+    target2 = safeDirection === 'short'
+      ? target1 - Math.max(entryPrice * 0.0005, riskPerShare * 0.08)
+      : target1 + Math.max(entryPrice * 0.0005, riskPerShare * 0.08)
   }
 
   stopLoss = roundToPaise(stopLoss)
@@ -1198,9 +1343,10 @@ export function calculateIntradayEntryPrice({
     entryPrice,
     stopLoss,
     target1,
-    costBps: DEFAULT_INTRADAY_ROUND_TRIP_COST_BPS
+    costBps: DEFAULT_INTRADAY_ROUND_TRIP_COST_BPS,
+    direction: safeDirection
   })
-  const rrGross = rrStats?.riskRewardGross ?? calculateRiskReward(entryPrice, stopLoss, target1)
+  const rrGross = rrStats?.riskRewardGross ?? calculateRiskReward(entryPrice, stopLoss, target1, safeDirection)
   const rrNet = rrStats?.riskRewardAfterCosts ?? rrGross
   const actionableEntryQuality = buildActionableEntryQuality({
     currentPrice,
@@ -1208,11 +1354,11 @@ export function calculateIntradayEntryPrice({
     entryType,
     riskRewardNet: rrNet,
     mode: 'intraday',
-    structureExtensionPct: hasVwap ? ((currentPrice - vwap) / vwap) * 100 : null,
+    direction: safeDirection,
+    structureExtensionPct,
     effectiveGapPct: gapOpenPct
   })
-  
-  // 🛡️ INSTITUTIONAL GUARD: Check RR before returning
+
   if ((rrNet ?? 0) < 1) {
     return {
       entryPrice,
@@ -1221,25 +1367,25 @@ export function calculateIntradayEntryPrice({
       target2: Math.round(target2 * 100) / 100,
       entryReason,
       entryType: 'rr_weak',
+      direction: safeDirection,
       actionableEntryQuality: buildActionableEntryQuality({
         currentPrice,
         entryPrice,
         entryType: 'rr_weak',
         riskRewardNet: rrNet,
         mode: 'intraday',
-        structureExtensionPct: hasVwap ? ((currentPrice - vwap) / vwap) * 100 : null,
+        direction: safeDirection,
+        structureExtensionPct,
         effectiveGapPct: gapOpenPct
       }),
       riskReward: formatRatio(rrNet),
       riskRewardAfterCosts: formatRatio(rrNet),
       riskRewardGross: formatRatio(rrGross),
-      estimatedRoundTripCostPerShare: rrStats
-        ? Math.round(rrStats.estimatedRoundTripCostPerShare * 100) / 100
-        : null,
+      estimatedRoundTripCostPerShare: rrStats ? Math.round(rrStats.estimatedRoundTripCostPerShare * 100) / 100 : null,
       estimatedRoundTripCostPct: rrStats?.estimatedRoundTripCostPct ?? null
     }
   }
-  
+
   return {
     entryPrice,
     stopLoss: Math.round(stopLoss * 100) / 100,
@@ -1247,15 +1393,14 @@ export function calculateIntradayEntryPrice({
     target2: Math.round(target2 * 100) / 100,
     entryReason,
     entryType,
+    direction: safeDirection,
     actionableEntryQuality,
     riskReward: formatRatio(rrNet),
     riskRewardAfterCosts: formatRatio(rrNet),
     riskRewardGross: formatRatio(rrGross),
-    estimatedRoundTripCostPerShare: rrStats
-      ? Math.round(rrStats.estimatedRoundTripCostPerShare * 100) / 100
-      : null,
+    estimatedRoundTripCostPerShare: rrStats ? Math.round(rrStats.estimatedRoundTripCostPerShare * 100) / 100 : null,
     estimatedRoundTripCostPct: rrStats?.estimatedRoundTripCostPct ?? null
-  };
+  }
 }
 
 /**
@@ -1287,9 +1432,12 @@ export function evaluateIntraday({
   const aboveVWAP = hasVwap && price > vwap
   const belowVWAP = hasVwap && price < vwap
   const breakoutConfirmed = getBreakoutConfirmation(resistance, price, volumeSpike)
+  const breakdownConfirmed = getBreakdownConfirmation(support, price, volumeSpike)
   const nearSupport = support && price <= support * 1.02
+  const nearResistance = resistance && price >= resistance * 0.98
   const effectiveGap = (gapNowPct ?? gapOpenPct ?? 0)
   const volumeOK = volumeSpike || (aboveVWAP && rsi > 50)
+  const sellVolumeOK = volumeSpike || (belowVWAP && rsi < 50)
 
   // Protect against CHOP days - filter sideways markets
   if (
@@ -1302,6 +1450,7 @@ export function evaluateIntraday({
     return {
       label: 'Choppy Market – Avoid',
       sentiment: 'neutral',
+      tradeDirection: 'long',
       reasons
     }
   }
@@ -1312,6 +1461,7 @@ export function evaluateIntraday({
     return {
       label: 'Low Liquidity - Avoid',
       sentiment: 'negative',
+      tradeDirection: 'long',
       reasons
     }
   }
@@ -1336,6 +1486,32 @@ export function evaluateIntraday({
     return {
       label: 'Strong Intraday Buy',
       sentiment: 'positive',
+      tradeDirection: 'long',
+      reasons
+    }
+  }
+
+  /* =========================
+     1B️⃣ STRONG INTRADAY SELL
+  ========================== */
+  if (
+    rsi >= 35 &&
+    rsi <= 60 &&
+    effectiveGap <= -0.2 &&
+    effectiveGap > -3.5 &&
+    sellVolumeOK &&
+    belowVWAP &&
+    !breakdownConfirmed
+  ) {
+    reasons.push(effectiveGap < -0.5 ? 'Gap down with institutional distribution' : 'Negative price action with sell-side pressure')
+    reasons.push('Price below VWAP shows bearish structure')
+    reasons.push('RSI is aligned with downside continuation')
+    reasons.push(candleColor === 'red' ? 'Red candle confirms selling pressure' : 'Weak bounce, sellers still in control')
+
+    return {
+      label: 'Strong Intraday Sell',
+      sentiment: 'negative',
+      tradeDirection: 'short',
       reasons
     }
   }
@@ -1357,6 +1533,29 @@ export function evaluateIntraday({
     return {
       label: 'Momentum Continuation',
       sentiment: 'positive',
+      tradeDirection: 'long',
+      reasons
+    }
+  }
+
+  /* =========================
+     2B️⃣ DOWNSIDE CONTINUATION
+  ========================== */
+  if (
+    rsi >= 35 &&
+    rsi <= 58 &&
+    belowVWAP &&
+    effectiveGap <= 0.2
+  ) {
+    reasons.push('Downside continuation pattern')
+    reasons.push('Trading below key VWAP level')
+    reasons.push(volumeSpike ? 'Volume supports seller control' : 'Watch for stronger sell volume confirmation')
+    reasons.push(candleColor === 'red' ? 'Bearish candle structure' : 'Weak consolidation with downside bias')
+
+    return {
+      label: 'Downside Continuation',
+      sentiment: 'negative',
+      tradeDirection: 'short',
       reasons
     }
   }
@@ -1377,6 +1576,7 @@ export function evaluateIntraday({
     return {
       label: 'Stretch Zone - Scalp Only',
       sentiment: 'positive',
+      tradeDirection: 'long',
       reasons
     }
   }
@@ -1396,6 +1596,27 @@ export function evaluateIntraday({
     return {
       label: 'Breakout Candidate',
       sentiment: 'positive',
+      tradeDirection: 'long',
+      reasons
+    }
+  }
+
+  /* =========================
+     3B️⃣ BREAKDOWN PLAY
+  ========================== */
+  if (
+    breakdownConfirmed &&
+    rsi >= 28 &&
+    rsi <= 55
+  ) {
+    reasons.push('Institutional-grade support breakdown confirmed')
+    reasons.push('Volume confirms support failure')
+    reasons.push(candleColor === 'red' ? 'Bearish momentum below support' : 'Support cracked; sellers still controlling the tape')
+
+    return {
+      label: 'Breakdown Candidate',
+      sentiment: 'negative',
+      tradeDirection: 'short',
       reasons
     }
   }
@@ -1416,6 +1637,29 @@ export function evaluateIntraday({
     return {
       label: 'Moderate Momentum - Watch',
       sentiment: 'positive',
+      tradeDirection: 'long',
+      reasons
+    }
+  }
+
+  /* =========================
+     4B️⃣ DISTRIBUTION WATCH
+  ========================== */
+  if (
+    rsi >= 40 &&
+    rsi <= 58 &&
+    belowVWAP &&
+    effectiveGap <= 0.3 &&
+    !nearSupport
+  ) {
+    reasons.push('Distribution-style weakness below VWAP')
+    reasons.push(volumeSpike ? 'Volume suggests active institutional selling' : 'Weak structure; wait for better sell-side confirmation')
+    reasons.push(nearResistance ? 'Trading close to resistance keeps rejection risk elevated' : 'Lower-high behaviour keeps downside pressure intact')
+
+    return {
+      label: 'Distribution Watch',
+      sentiment: 'negative',
+      tradeDirection: 'short',
       reasons
     }
   }
@@ -1437,6 +1681,7 @@ export function evaluateIntraday({
     return {
       label: 'Consolidation Watch',
       sentiment: 'positive',
+      tradeDirection: 'long',
       reasons
     }
   }
@@ -1453,6 +1698,7 @@ export function evaluateIntraday({
     return {
       label: 'Overbought - Avoid Fresh Entry',
       sentiment: 'negative',
+      tradeDirection: 'short',
       reasons
     }
   }
@@ -1472,6 +1718,7 @@ export function evaluateIntraday({
     return {
       label: 'Bearish Momentum - Avoid',
       sentiment: 'negative',
+      tradeDirection: 'short',
       reasons
     }
   }
@@ -1485,6 +1732,7 @@ export function evaluateIntraday({
   return {
     label: 'No Clear Intraday Signal',
     sentiment: 'neutral',
+    tradeDirection: 'long',
     reasons
   }
 }

@@ -132,11 +132,15 @@ async function deepScanSymbol(symbol) {
       volumeSpike: volumeData.volumeSpike, price: gapData.currentPrice,
       vwap, support, resistance, candleColor, marketCap: gapData.marketCap
     });
+    const intradayDirection = intradayView?.tradeDirection === 'short' || intradayView?.sentiment === 'negative'
+      ? 'short'
+      : 'long'
 
     const entryPriceData = calculateIntradayEntryPrice({
       price: gapData.currentPrice, vwap, support, resistance, rsi,
       candleColor, gapOpenPct: gapData.gapOpenPct, volumeSpike: volumeData.volumeSpike,
-      volatilityPct
+      volatilityPct,
+      direction: intradayDirection
     });
 
     return {
@@ -148,6 +152,7 @@ async function deepScanSymbol(symbol) {
       volatilityPct: Number.isFinite(volatilityPct) ? Number(volatilityPct.toFixed(2)) : null,
       resolvedSymbol, intradayView,
       finalSentiment: intradayView.sentiment,
+      direction: entryPriceData.direction || intradayDirection,
       entryPrice: entryPriceData.entryPrice, stopLoss: entryPriceData.stopLoss,
       target1: entryPriceData.target1, target2: entryPriceData.target2,
       entryReason: entryPriceData.entryReason, entryType: entryPriceData.entryType,
@@ -304,8 +309,10 @@ router.post('/', intradayScanLimiter, async (req, res) => {
   if (!marketState.isOpen && !parseBooleanFlag(forceRunWhenClosed, false)) {
     return res.json({
       positiveStocks: [],
+      negativeStocks: [],
       totalScanned: 0,
       positiveCount: 0,
+      negativeCount: 0,
       compliance,
       meta: {
         rsiPeriod: effectiveRSIPeriod,
@@ -407,6 +414,9 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             candleColor,
             marketCap: gapData.marketCap
           });
+          const intradayDirection = intradayView?.tradeDirection === 'short' || intradayView?.sentiment === 'negative'
+            ? 'short'
+            : 'long'
 
           /* =====================
              ENTRY PRICE CALCULATION
@@ -420,7 +430,8 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             candleColor,
             gapOpenPct: gapData.gapOpenPct,
             volumeSpike: volumeData.volumeSpike,
-            volatilityPct
+            volatilityPct,
+            direction: intradayDirection
           });
 
           /* =====================
@@ -452,6 +463,7 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             resolvedSymbol,
             intradayView,
             finalSentiment: intradayView.sentiment, // Add final sentiment decision
+            direction: entryPriceData.direction || intradayDirection,
             
             // Entry price information
             entryPrice: entryPriceData.entryPrice,
@@ -485,6 +497,15 @@ router.post('/', intradayScanLimiter, async (req, res) => {
               stock.entryType !== 'rr_weak' && // Exclude weak RR setups flagged by calculator
               parseFloat(stock.riskReward) >= 1.0 // Exclude RR < 1:1
     );
+    const negativeStocks = results.filter(
+      stock => !stock.error &&
+              stock.intradayView &&
+              stock.intradayView.sentiment === 'negative' &&
+              stock.direction === 'short' &&
+              stock.entryType !== 'scalp_only' &&
+              stock.entryType !== 'rr_weak' &&
+              parseFloat(stock.riskReward) >= 1.0
+    );
 
     // Sort by signal strength (you can customize this logic)
     positiveStocks.sort((a, b) => {
@@ -499,8 +520,10 @@ router.post('/', intradayScanLimiter, async (req, res) => {
 
     res.json({
       positiveStocks,
+      negativeStocks,
       totalScanned: results.length,
       positiveCount: positiveStocks.length,
+      negativeCount: negativeStocks.length,
       compliance,
       meta: {
         rsiPeriod: effectiveRSIPeriod,
