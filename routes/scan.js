@@ -136,6 +136,43 @@ function sanitizeRSIPeriod(input, fallback = 14) {
   return asInt;
 }
 
+function inferIntradayBiasDirection(view) {
+  if (view?.biasDirection === 'short' || view?.tradeDirection === 'short') return 'short';
+  if (view?.biasDirection === 'long' || view?.tradeDirection === 'long') return 'long';
+  if (view?.sentiment === 'negative') return 'short';
+  if (view?.sentiment === 'positive') return 'long';
+  return null;
+}
+
+function buildIntradayExecutionMeta({ marketState, intradayView, entryPlan, fallbackDirection }) {
+  const biasDirection = inferIntradayBiasDirection(intradayView) || fallbackDirection || 'long';
+  const riskReward = Number.parseFloat(entryPlan?.riskReward);
+  const hasValidRr = Number.isFinite(riskReward) && riskReward >= 1;
+  const entryType = entryPlan?.entryType || 'invalid';
+  const qualifies =
+    marketState?.isOpen &&
+    ['positive', 'negative'].includes(intradayView?.sentiment) &&
+    !['scalp_only', 'rr_weak', 'invalid'].includes(entryType) &&
+    hasValidRr;
+
+  let blockerReason = null;
+  if (!marketState?.isOpen) blockerReason = marketState?.reason || 'market_closed';
+  else if (entryType === 'scalp_only') blockerReason = 'scalp_only';
+  else if (entryType === 'rr_weak') blockerReason = 'rr_weak';
+  else if (entryType === 'invalid') blockerReason = 'invalid_entry_plan';
+  else if (!hasValidRr) blockerReason = 'rr_below_threshold';
+  else if (!['positive', 'negative'].includes(intradayView?.sentiment)) blockerReason = intradayView?.blockerReason || 'no_trade_signal';
+
+  return {
+    biasDirection,
+    executionDirection: qualifies
+      ? (entryPlan?.direction || intradayView?.executionDirection || biasDirection)
+      : null,
+    qualifies,
+    blockerReason: qualifies ? null : (blockerReason || intradayView?.blockerReason || null)
+  };
+}
+
 function getIndianMarketState(now = new Date()) {
   const parts = IST_PARTS_FORMATTER.formatToParts(now);
   const map = Object.fromEntries(parts.map(part => [part.type, part.value]));
@@ -294,9 +331,7 @@ const gapData = await fetchGapData(resolvedSymbol)
             candleColor,
             marketCap: gapData.marketCap
           });
-          const intradayDirection = intradayView?.tradeDirection === 'short' || intradayView?.sentiment === 'negative'
-            ? 'short'
-            : 'long'
+          const intradayDirection = inferIntradayBiasDirection(intradayView) || 'long'
 
           const intradayEntryPlan = calculateIntradayEntryPrice({
             price: gapData.currentPrice,
@@ -309,6 +344,12 @@ const gapData = await fetchGapData(resolvedSymbol)
             volumeSpike: volumeData.volumeSpike,
             volatilityPct: null,
             direction: intradayDirection
+          });
+          const intradayExecutionMeta = buildIntradayExecutionMeta({
+            marketState,
+            intradayView,
+            entryPlan: intradayEntryPlan,
+            fallbackDirection: intradayDirection
           });
 
     /* =====================
@@ -380,13 +421,13 @@ const longTermView = evaluateLongTerm({
             datetime: n.datetime,
             keywords: n.keywords
           }));
-          const intradayOpportunity = marketState.isOpen &&
-            ['positive', 'negative'].includes(intradayView?.sentiment) &&
-            !['scalp_only', 'rr_weak'].includes(intradayEntryPlan?.entryType) &&
-            Number.parseFloat(intradayEntryPlan?.riskReward) >= 1
+          const intradayOpportunity = intradayExecutionMeta.qualifies
             ? {
                 qualifies: true,
-                direction: intradayEntryPlan.direction || intradayDirection,
+                direction: intradayExecutionMeta.executionDirection,
+                biasDirection: intradayExecutionMeta.biasDirection,
+                executionDirection: intradayExecutionMeta.executionDirection,
+                blockerReason: null,
                 entryPrice: intradayEntryPlan.entryPrice,
                 stopLoss: intradayEntryPlan.stopLoss,
                 target1: intradayEntryPlan.target1,
@@ -398,6 +439,10 @@ const longTermView = evaluateLongTerm({
               }
             : {
                 qualifies: false,
+                direction: intradayExecutionMeta.biasDirection,
+                biasDirection: intradayExecutionMeta.biasDirection,
+                executionDirection: null,
+                blockerReason: intradayExecutionMeta.blockerReason,
                 reason: marketState.isOpen
                   ? (intradayView?.reasons?.[0] || intradayView?.label || 'No intraday edge')
                   : 'Intraday execution is only active during market hours.'

@@ -132,15 +132,19 @@ async function deepScanSymbol(symbol) {
       volumeSpike: volumeData.volumeSpike, price: gapData.currentPrice,
       vwap, support, resistance, candleColor, marketCap: gapData.marketCap
     });
-    const intradayDirection = intradayView?.tradeDirection === 'short' || intradayView?.sentiment === 'negative'
-      ? 'short'
-      : 'long'
+    const intradayDirection = inferIntradayBiasDirection(intradayView) || 'long'
 
     const entryPriceData = calculateIntradayEntryPrice({
       price: gapData.currentPrice, vwap, support, resistance, rsi,
       candleColor, gapOpenPct: gapData.gapOpenPct, volumeSpike: volumeData.volumeSpike,
       volatilityPct,
       direction: intradayDirection
+    });
+    const executionMeta = buildIntradayExecutionMeta({
+      marketState: { isOpen: true, reason: 'market_open' },
+      intradayView,
+      entryPriceData,
+      fallbackDirection: intradayDirection
     });
 
     return {
@@ -152,7 +156,10 @@ async function deepScanSymbol(symbol) {
       volatilityPct: Number.isFinite(volatilityPct) ? Number(volatilityPct.toFixed(2)) : null,
       resolvedSymbol, intradayView,
       finalSentiment: intradayView.sentiment,
-      direction: entryPriceData.direction || intradayDirection,
+      direction: executionMeta.executionDirection || executionMeta.biasDirection,
+      biasDirection: executionMeta.biasDirection,
+      executionDirection: executionMeta.executionDirection,
+      blockerReason: executionMeta.blockerReason,
       entryPrice: entryPriceData.entryPrice, stopLoss: entryPriceData.stopLoss,
       target1: entryPriceData.target1, target2: entryPriceData.target2,
       entryReason: entryPriceData.entryReason, entryType: entryPriceData.entryType,
@@ -261,6 +268,43 @@ function parseBooleanFlag(input, fallback = false) {
     if (val === 'false') return false;
   }
   return fallback;
+}
+
+function inferIntradayBiasDirection(view) {
+  if (view?.biasDirection === 'short' || view?.tradeDirection === 'short') return 'short';
+  if (view?.biasDirection === 'long' || view?.tradeDirection === 'long') return 'long';
+  if (view?.sentiment === 'negative') return 'short';
+  if (view?.sentiment === 'positive') return 'long';
+  return null;
+}
+
+function buildIntradayExecutionMeta({ marketState, intradayView, entryPriceData, fallbackDirection }) {
+  const biasDirection = inferIntradayBiasDirection(intradayView) || fallbackDirection || 'long';
+  const riskReward = Number.parseFloat(entryPriceData?.riskReward);
+  const hasValidRr = Number.isFinite(riskReward) && riskReward >= 1;
+  const entryType = entryPriceData?.entryType || 'invalid';
+  const qualifies =
+    marketState?.isOpen &&
+    ['positive', 'negative'].includes(intradayView?.sentiment) &&
+    !['scalp_only', 'rr_weak', 'invalid'].includes(entryType) &&
+    hasValidRr;
+
+  let blockerReason = null;
+  if (!marketState?.isOpen) blockerReason = marketState?.reason || 'market_closed';
+  else if (entryType === 'scalp_only') blockerReason = 'scalp_only';
+  else if (entryType === 'rr_weak') blockerReason = 'rr_weak';
+  else if (entryType === 'invalid') blockerReason = 'invalid_entry_plan';
+  else if (!hasValidRr) blockerReason = 'rr_below_threshold';
+  else if (!['positive', 'negative'].includes(intradayView?.sentiment)) blockerReason = intradayView?.blockerReason || 'no_trade_signal';
+
+  return {
+    biasDirection,
+    executionDirection: qualifies
+      ? (entryPriceData?.direction || intradayView?.executionDirection || biasDirection)
+      : null,
+    qualifies,
+    blockerReason: qualifies ? null : (blockerReason || intradayView?.blockerReason || null)
+  };
 }
 
 function getIndianMarketState(now = new Date()) {
@@ -414,9 +458,7 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             candleColor,
             marketCap: gapData.marketCap
           });
-          const intradayDirection = intradayView?.tradeDirection === 'short' || intradayView?.sentiment === 'negative'
-            ? 'short'
-            : 'long'
+          const intradayDirection = inferIntradayBiasDirection(intradayView) || 'long'
 
           /* =====================
              ENTRY PRICE CALCULATION
@@ -432,6 +474,12 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             volumeSpike: volumeData.volumeSpike,
             volatilityPct,
             direction: intradayDirection
+          });
+          const executionMeta = buildIntradayExecutionMeta({
+            marketState,
+            intradayView,
+            entryPriceData,
+            fallbackDirection: intradayDirection
           });
 
           /* =====================
@@ -463,7 +511,10 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             resolvedSymbol,
             intradayView,
             finalSentiment: intradayView.sentiment, // Add final sentiment decision
-            direction: entryPriceData.direction || intradayDirection,
+            direction: executionMeta.executionDirection || executionMeta.biasDirection,
+            biasDirection: executionMeta.biasDirection,
+            executionDirection: executionMeta.executionDirection,
+            blockerReason: executionMeta.blockerReason,
             
             // Entry price information
             entryPrice: entryPriceData.entryPrice,
@@ -501,7 +552,7 @@ router.post('/', intradayScanLimiter, async (req, res) => {
       stock => !stock.error &&
               stock.intradayView &&
               stock.intradayView.sentiment === 'negative' &&
-              stock.direction === 'short' &&
+              (stock.executionDirection === 'short' || stock.direction === 'short') &&
               stock.entryType !== 'scalp_only' &&
               stock.entryType !== 'rr_weak' &&
               parseFloat(stock.riskReward) >= 1.0

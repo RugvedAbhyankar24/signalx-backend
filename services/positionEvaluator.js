@@ -1438,6 +1438,22 @@ export function evaluateIntraday({
   const effectiveGap = (gapNowPct ?? gapOpenPct ?? 0)
   const volumeOK = volumeSpike || (aboveVWAP && rsi > 50)
   const sellVolumeOK = volumeSpike || (belowVWAP && rsi < 50)
+  const buildIntradayView = ({
+    label,
+    sentiment,
+    biasDirection = 'long',
+    executionDirection = null,
+    blockerReason = null,
+    reasons: viewReasons
+  }) => ({
+    label,
+    sentiment,
+    tradeDirection: biasDirection,
+    biasDirection,
+    executionDirection,
+    blockerReason,
+    reasons: viewReasons
+  })
 
   // Protect against CHOP days - filter sideways markets
   if (
@@ -1447,23 +1463,27 @@ export function evaluateIntraday({
     Math.abs(price - vwap) / vwap < 0.002
   ) {
     reasons.push('Low volatility chop – intraday edge absent')
-    return {
+    return buildIntradayView({
       label: 'Choppy Market – Avoid',
       sentiment: 'neutral',
-      tradeDirection: 'long',
+      biasDirection: 'long',
+      executionDirection: null,
+      blockerReason: 'choppy_market',
       reasons
-    }
+    })
   }
   
   // Filter for liquid stocks (market cap > 1000 cr)
   if (!marketCap || marketCap < 1e10) {
     reasons.push('Insufficient liquidity for intraday trading')
-    return {
+    return buildIntradayView({
       label: 'Low Liquidity - Avoid',
       sentiment: 'negative',
-      tradeDirection: 'long',
+      biasDirection: 'long',
+      executionDirection: null,
+      blockerReason: 'low_liquidity',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1483,12 +1503,13 @@ export function evaluateIntraday({
     reasons.push('RSI in optimal intraday zone')
     reasons.push(candleColor === 'green' ? 'Green candle confirms buying pressure' : 'Building momentum')
 
-    return {
+    return buildIntradayView({
       label: 'Strong Intraday Buy',
       sentiment: 'positive',
-      tradeDirection: 'long',
+      biasDirection: 'long',
+      executionDirection: 'long',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1508,12 +1529,13 @@ export function evaluateIntraday({
     reasons.push('RSI is aligned with downside continuation')
     reasons.push(candleColor === 'red' ? 'Red candle confirms selling pressure' : 'Weak bounce, sellers still in control')
 
-    return {
+    return buildIntradayView({
       label: 'Strong Intraday Sell',
       sentiment: 'negative',
-      tradeDirection: 'short',
+      biasDirection: 'short',
+      executionDirection: 'short',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1530,12 +1552,13 @@ export function evaluateIntraday({
     reasons.push(volumeSpike ? 'Volume supports the move' : 'Watch for volume confirmation')
     reasons.push(candleColor === 'green' ? 'Bullish candle pattern' : 'Consolidating with upside bias')
 
-    return {
+    return buildIntradayView({
       label: 'Momentum Continuation',
       sentiment: 'positive',
-      tradeDirection: 'long',
+      biasDirection: 'long',
+      executionDirection: 'long',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1552,12 +1575,13 @@ export function evaluateIntraday({
     reasons.push(volumeSpike ? 'Volume supports seller control' : 'Watch for stronger sell volume confirmation')
     reasons.push(candleColor === 'red' ? 'Bearish candle structure' : 'Weak consolidation with downside bias')
 
-    return {
+    return buildIntradayView({
       label: 'Downside Continuation',
       sentiment: 'negative',
-      tradeDirection: 'short',
+      biasDirection: 'short',
+      executionDirection: 'short',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1573,12 +1597,14 @@ export function evaluateIntraday({
     reasons.push('Trading above VWAP with volume confirmation')
     reasons.push('Suitable for scalp/quick trades only')
 
-    return {
+    return buildIntradayView({
       label: 'Stretch Zone - Scalp Only',
       sentiment: 'positive',
-      tradeDirection: 'long',
+      biasDirection: 'long',
+      executionDirection: 'long',
+      blockerReason: 'scalp_only',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1593,12 +1619,13 @@ export function evaluateIntraday({
     reasons.push('Volume confirms resistance break')
     reasons.push(candleColor === 'green' ? 'Bullish momentum toward resistance' : 'Consolidating before breakout')
 
-    return {
+    return buildIntradayView({
       label: 'Breakout Candidate',
       sentiment: 'positive',
-      tradeDirection: 'long',
+      biasDirection: 'long',
+      executionDirection: 'long',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1613,12 +1640,13 @@ export function evaluateIntraday({
     reasons.push('Volume confirms support failure')
     reasons.push(candleColor === 'red' ? 'Bearish momentum below support' : 'Support cracked; sellers still controlling the tape')
 
-    return {
+    return buildIntradayView({
       label: 'Breakdown Candidate',
       sentiment: 'negative',
-      tradeDirection: 'short',
+      biasDirection: 'short',
+      executionDirection: 'short',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1634,12 +1662,13 @@ export function evaluateIntraday({
     reasons.push(volumeSpike ? 'Volume confirms interest' : 'Awaiting volume confirmation')
     reasons.push(candleColor === 'green' ? 'Bullish bias' : 'Consolidating with upside potential')
 
-    return {
+    return buildIntradayView({
       label: 'Moderate Momentum - Watch',
       sentiment: 'positive',
-      tradeDirection: 'long',
+      biasDirection: 'long',
+      executionDirection: 'long',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1656,12 +1685,13 @@ export function evaluateIntraday({
     reasons.push(volumeSpike ? 'Volume suggests active institutional selling' : 'Weak structure; wait for better sell-side confirmation')
     reasons.push(nearResistance ? 'Trading close to resistance keeps rejection risk elevated' : 'Lower-high behaviour keeps downside pressure intact')
 
-    return {
+    return buildIntradayView({
       label: 'Distribution Watch',
       sentiment: 'negative',
-      tradeDirection: 'short',
+      biasDirection: 'short',
+      executionDirection: 'short',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1678,12 +1708,13 @@ export function evaluateIntraday({
     reasons.push(volumeSpike ? 'Volume suggests impending move' : 'Low volatility - add to watchlist')
     reasons.push(aboveVWAP ? 'Above VWAP provides support' : 'Below VWAP - needs confirmation')
 
-    return {
+    return buildIntradayView({
       label: 'Consolidation Watch',
       sentiment: 'positive',
-      tradeDirection: 'long',
+      biasDirection: 'long',
+      executionDirection: 'long',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1695,12 +1726,14 @@ export function evaluateIntraday({
     reasons.push('Unfavorable risk-reward for fresh entries')
     reasons.push('Avoid fresh entries - scalp only if experienced')
 
-    return {
+    return buildIntradayView({
       label: 'Overbought - Avoid Fresh Entry',
       sentiment: 'negative',
-      tradeDirection: 'short',
+      biasDirection: 'short',
+      executionDirection: null,
+      blockerReason: 'overbought_distribution',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1715,12 +1748,14 @@ export function evaluateIntraday({
     reasons.push('Gap down indicates weakness')
     reasons.push('Red candle confirms selling pressure')
 
-    return {
+    return buildIntradayView({
       label: 'Bearish Momentum - Avoid',
       sentiment: 'negative',
-      tradeDirection: 'short',
+      biasDirection: 'short',
+      executionDirection: null,
+      blockerReason: 'weak_bearish_structure',
       reasons
-    }
+    })
   }
 
   /* =========================
@@ -1729,10 +1764,12 @@ export function evaluateIntraday({
   reasons.push('No clear intraday signal detected')
   reasons.push('Insufficient momentum or volume confirmation')
 
-  return {
+  return buildIntradayView({
     label: 'No Clear Intraday Signal',
     sentiment: 'neutral',
-    tradeDirection: 'long',
+    biasDirection: 'long',
+    executionDirection: null,
+    blockerReason: 'no_clear_signal',
     reasons
-  }
+  })
 }
