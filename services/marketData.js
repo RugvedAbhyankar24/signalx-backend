@@ -509,8 +509,9 @@ export async function fastMarketScan() {
       const nearHighScore =
         Number.isFinite(dayHigh) && dayHigh > 0 ? 1 - Math.min(Math.max((dayHigh - price) / dayHigh, 0), 1) : 0.5
 
-      const directionalBias = changePct >= 0 ? changePct : changePct * 0.35
-      const participationScore = Math.max(changePct, 0.15) * Math.sqrt(Math.max(volume, 1))
+      const side = changePct >= 0 ? 'long' : 'short'
+      const directionalBias = Math.abs(changePct)
+      const participationScore = movement * Math.sqrt(Math.max(volume, 1))
 
       const compositeScore =
         movement * 3.9 +
@@ -531,6 +532,7 @@ export async function fastMarketScan() {
         intradayMoveFromOpen,
         dayRangePct,
         nearHighScore,
+        side,
         compositeScore,
         gapPct: Number.isFinite(prevClose) && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : null
       }
@@ -547,17 +549,25 @@ export async function fastMarketScan() {
   const participationCount = Math.max(8, Math.round(stage1Limit * 0.3))
   const compositeCount = Math.max(12, Math.round(stage1Limit * 0.45))
 
-  const momentumLeaders = [...institutionalPool]
-    .sort((a, b) => b.movement - a.movement)
-    .slice(0, momentumCount)
+  const upsidePool = institutionalPool.filter(s => s.side === 'long')
+  const downsidePool = institutionalPool.filter(s => s.side === 'short')
+  const balancedPerSide = Math.max(6, Math.round(stage1Limit * 0.22))
+
+  const momentumLeaders = [
+    ...[...upsidePool].sort((a, b) => b.changePct - a.changePct).slice(0, balancedPerSide),
+    ...[...downsidePool].sort((a, b) => a.changePct - b.changePct).slice(0, balancedPerSide),
+    ...[...institutionalPool].sort((a, b) => b.movement - a.movement).slice(0, Math.max(6, momentumCount - (balancedPerSide * 2)))
+  ]
 
   const liquidityLeaders = [...institutionalPool]
     .sort((a, b) => b.turnover - a.turnover)
     .slice(0, liquidityCount)
 
-  const participationLeaders = [...institutionalPool]
-    .sort((a, b) => b.participationScore - a.participationScore)
-    .slice(0, participationCount)
+  const participationLeaders = [
+    ...[...upsidePool].sort((a, b) => b.participationScore - a.participationScore).slice(0, Math.max(4, Math.round(participationCount / 2))),
+    ...[...downsidePool].sort((a, b) => b.participationScore - a.participationScore).slice(0, Math.max(4, Math.round(participationCount / 2))),
+    ...[...institutionalPool].sort((a, b) => b.participationScore - a.participationScore).slice(0, 4)
+  ]
 
   const compositeLeaders = [...institutionalPool]
     .sort((a, b) => b.compositeScore - a.compositeScore)
@@ -580,6 +590,7 @@ export async function fastMarketScan() {
       price: s.price,
       changePct: s.changePct,
       volume: s.volume,
+      side: s.side,
       movement: s.movement,
       turnover: Math.round(s.turnover),
       intradayMoveFromOpen: Number(s.intradayMoveFromOpen.toFixed(2)),

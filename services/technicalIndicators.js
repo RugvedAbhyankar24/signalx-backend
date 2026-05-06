@@ -12,6 +12,10 @@ function getISTDate(input) {
   return IST_DATE_FORMATTER.format(d);
 }
 
+export function getCurrentISTDate() {
+  return IST_DATE_FORMATTER.format(new Date());
+}
+
 function toFiniteNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -58,6 +62,18 @@ export function detectVolumeSpike(candles, lookback = 20, multiplier = 1.5) {
   };
 }
 
+export function filterCandlesToISTSession(candles, sessionDate = getCurrentISTDate()) {
+  if (!Array.isArray(candles) || candles.length === 0) return [];
+  return candles.filter(c => c?.tradeDateIST === sessionDate || getISTDate(c?.timestamp) === sessionDate);
+}
+
+export function selectIntradaySessionCandles(candles, fallbackCount = 24) {
+  if (!Array.isArray(candles) || candles.length === 0) return [];
+  const sessionCandles = filterCandlesToISTSession(candles);
+  if (sessionCandles.length > 0) return sessionCandles;
+  return candles.slice(-fallbackCount);
+}
+
 export function calculateVWAP(candles) {
   if (!Array.isArray(candles) || candles.length === 0) return null;
   let pv = 0;
@@ -82,15 +98,7 @@ export function calculateIntradayVWAP(candles) {
   if (!Array.isArray(candles) || candles.length === 0) return null;
   let pv = 0, vol = 0;
 
-  const todayIST = IST_DATE_FORMATTER.format(new Date());
-
-  // Filter for today's IST trading session
-  const todayCandles = candles.filter(c =>
-    c.tradeDateIST === todayIST || getISTDate(c.timestamp) === todayIST
-  );
-  
-  // If no today's candles, use last few candles as fallback
-  const candlesToUse = todayCandles.length > 0 ? todayCandles : candles.slice(-5);
+  const candlesToUse = selectIntradaySessionCandles(candles, 5);
 
   for (const c of candlesToUse) {
     const high = toFiniteNumber(c?.high);

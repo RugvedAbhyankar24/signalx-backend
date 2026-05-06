@@ -541,6 +541,21 @@ export function evaluateLongTerm({ rsi, marketCap, fundamentals }) {
     }
   }
 
+  const auditedMetricCount = [
+    fundamentals?.revenueGrowth,
+    fundamentals?.profitGrowth,
+    fundamentals?.debtToEquity,
+    fundamentals?.roe
+  ].filter(Number.isFinite).length
+
+  if (auditedMetricCount < 3) {
+    return {
+      label: 'Insufficient Fundamental Validation',
+      sentiment: 'neutral',
+      reasons: ['Long-term conviction requires at least three validated fundamental fields']
+    }
+  }
+
   const { score, reasons } = evaluateFundamentals({
     marketCap,
     ...fundamentals

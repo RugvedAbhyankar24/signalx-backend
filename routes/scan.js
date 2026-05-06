@@ -2,11 +2,12 @@ import express from 'express';
 import { fetchGapData, fetchOHLCV } from '../services/marketData.js';
 import {
   detectVolumeSpike,
-  calculateVWAP,
+  calculateIntradayVWAP,
   calculateSwingVWAP,
   supportResistance,
   detectBreakout,
-  estimateATRPercent
+  estimateATRPercent,
+  selectIntradaySessionCandles
 } from '../services/technicalIndicators.js';
 
 import { computeRSI, categorizeRSI } from '../services/rsiCalculator.js';
@@ -40,44 +41,67 @@ function getGapContext(gapOpenPct, gapNowPct) {
 // CORRECT (hierarchical) SENTIMENT LOGIC
 function deriveFinalSentiment({ intraday, swing, longTerm, gapOpenPct, gapNowPct }) {
   const gapContext = getGapContext(gapOpenPct, gapNowPct);
+  const longTermPositive = longTerm?.sentiment === 'positive'
+  const longTermNegative = longTerm?.sentiment === 'negative'
+  const intradayPositive = intraday?.sentiment === 'positive'
+  const intradayNegative = intraday?.sentiment === 'negative'
+  const swingPositive = swing?.sentiment === 'positive'
+  const swingNegative = swing?.sentiment === 'negative'
 
-  // 1️⃣ HARD BLOCKERS
-  if (swing?.sentiment === 'negative' && gapContext !== 'NO_GAP') {
+  if (longTermPositive && (intradayPositive || swingPositive) && gapContext !== 'NEGATIVE_GAP') {
     return {
-      label: 'Gap Risk - Avoid',
-      sentiment: 'negative',
-      reason: 'Gap risk overrides intraday momentum',
-      icon: '❌'
-    };
-  }
-
-  // 2️⃣ INTRADAY CAN PASS ONLY IF CONTEXT ALLOWS
-  if (
-    intraday?.sentiment === 'positive' &&
-    gapContext !== 'NEGATIVE_GAP'
-  ) {
-    return {
-      label: 'Tradeable',
+      label: 'Multi-Horizon Long',
       sentiment: 'positive',
-      reason: 'Intraday momentum aligned with gap context',
+      reason: 'Long-term quality is aligned with tactical strength',
       icon: '✅'
     };
   }
 
-  // 3️⃣ BREAKOUT EXCEPTION
-  if (
-    intraday?.label === 'Breakout Candidate' &&
-    intraday?.sentiment === 'positive'
-  ) {
+  if (longTermNegative && (intradayPositive || swingPositive)) {
     return {
-      label: 'Breakout Trade',
-      sentiment: 'positive',
-      reason: 'Institutional breakout overrides gap bias',
-      icon: '🚀'
+      label: 'Tactical Only',
+      sentiment: 'neutral',
+      reason: 'Short-term setup exists, but long-term underwriting is weak',
+      icon: 'ℹ️'
     };
   }
 
-  // 4️⃣ DEFAULT
+  if (swingNegative && gapContext !== 'NO_GAP') {
+    return {
+      label: 'Gap Risk - Avoid',
+      sentiment: 'negative',
+      reason: 'Gap risk overrides tactical momentum',
+      icon: '❌'
+    };
+  }
+
+  if (intradayPositive && gapContext !== 'NEGATIVE_GAP') {
+    return {
+      label: 'Tradeable',
+      sentiment: 'positive',
+      reason: 'Intraday momentum aligned with session context',
+      icon: '✅'
+    };
+  }
+
+  if (swingPositive && !intradayNegative) {
+    return {
+      label: 'Swing Build-Up',
+      sentiment: 'positive',
+      reason: 'Swing structure is constructive even without strong intraday confirmation',
+      icon: '✅'
+    };
+  }
+
+  if (longTermPositive) {
+    return {
+      label: 'Long-Term Watchlist',
+      sentiment: 'neutral',
+      reason: 'Business quality is strong, but tactical timing is not yet aligned',
+      icon: 'ℹ️'
+    };
+  }
+
   return {
     label: 'No Clear Signal',
     sentiment: 'neutral',
@@ -262,46 +286,61 @@ const gapData = await fetchGapData(resolvedSymbol)
           /* =====================
              OHLCV (Yahoo)
           ====================== */
-          const candles = await fetchOHLCV(
-            resolvedSymbol,
-            Math.max(60, effectiveRSIPeriod + 20)
-          );
+          const [intradayCandlesRaw, swingCandlesRaw] = await Promise.all([
+            fetchOHLCV(
+              resolvedSymbol,
+              Math.max(60, effectiveRSIPeriod + 20),
+              { interval: '5m', range: '5d' }
+            ),
+            fetchOHLCV(
+              resolvedSymbol,
+              Math.max(60, effectiveRSIPeriod + 20)
+            )
+          ]);
 
-
-          const technicalCandles = selectCandlesForTechnicals(candles, Math.max(20, effectiveRSIPeriod + 1));
-          const closes = technicalCandles.map(c => c.close);
-          const lastCandle = technicalCandles[technicalCandles.length - 1] || candles[candles.length - 1];
+          const intradayCandles = selectCandlesForTechnicals(intradayCandlesRaw, Math.max(20, effectiveRSIPeriod + 1));
+          const intradaySessionCandles = selectIntradaySessionCandles(intradayCandles);
+          const intradayRsiCandles = intradaySessionCandles.length >= effectiveRSIPeriod + 1 ? intradaySessionCandles : intradayCandles;
+          const swingCandles = selectCandlesForTechnicals(swingCandlesRaw, Math.max(20, effectiveRSIPeriod + 1));
+          const intradayCloses = intradayRsiCandles.map(c => c.close);
+          const swingCloses = swingCandles.map(c => c.close);
+          const intradayLastCandle = intradaySessionCandles[intradaySessionCandles.length - 1] || intradayCandles[intradayCandles.length - 1] || intradayCandlesRaw[intradayCandlesRaw.length - 1];
+          const swingLastCandle = swingCandles[swingCandles.length - 1] || swingCandlesRaw[swingCandlesRaw.length - 1];
 
           /* =====================
              RSI
           ====================== */
-          const rsi = computeRSI(closes, effectiveRSIPeriod);
-          const rsiCategory = categorizeRSI(rsi);
+          const intradayRsi = computeRSI(intradayCloses, effectiveRSIPeriod);
+          const swingRsi = computeRSI(swingCloses, effectiveRSIPeriod);
+          const rsiCategory = categorizeRSI(swingRsi);
 
           const rsiBias =
-            rsi > 50 ? 'bullish' :
-            rsi < 50 ? 'bearish' :
+            intradayRsi > 50 ? 'bullish' :
+            intradayRsi < 50 ? 'bearish' :
             'neutral';
 
           const candleColor =
-            lastCandle.close > lastCandle.open
+            intradayLastCandle.close > intradayLastCandle.open
               ? 'green'
-              : lastCandle.close < lastCandle.open
+              : intradayLastCandle.close < intradayLastCandle.open
               ? 'red'
               : 'neutral';
 
           /* =====================
              TECHNICALS
           ====================== */
-          const volumeData = detectVolumeSpike(technicalCandles);
-          const vwap = calculateVWAP(technicalCandles);
-          const swingVwap = calculateSwingVWAP(technicalCandles, 5);
-          const { support, resistance } = supportResistance(technicalCandles);
-          const volatilityPct = estimateATRPercent(technicalCandles, 14);
+          const volumeData = detectVolumeSpike(intradaySessionCandles);
+          const vwap = calculateIntradayVWAP(intradaySessionCandles);
+          const swingVwap = calculateSwingVWAP(swingCandles, 5);
+          const { support, resistance } = supportResistance(intradaySessionCandles);
+          const volatilityPct = estimateATRPercent(intradaySessionCandles, 14);
+          const { support: swingSupport, resistance: swingResistance } = supportResistance(swingCandles);
+          const swingVolatilityPct = estimateATRPercent(swingCandles, 14);
+          const swingVolumeData = detectVolumeSpike(swingCandles);
 
           const breakout =
             detectBreakout(gapData.currentPrice, resistance) ||
-            (gapData.currentPrice > vwap && lastCandle.close > lastCandle.open);
+            (gapData.currentPrice > vwap && intradayLastCandle.close > intradayLastCandle.open);
 
 
           /* =====================
@@ -320,7 +359,7 @@ const gapData = await fetchGapData(resolvedSymbol)
              INTRADAY ANALYSIS
           ====================== */
           const intradayView = evaluateIntraday({
-            rsi,
+            rsi: intradayRsi,
             gapOpenPct: gapData.gapOpenPct,
             gapNowPct: gapData.gapNowPct,
             volumeSpike: volumeData.volumeSpike,
@@ -338,11 +377,11 @@ const gapData = await fetchGapData(resolvedSymbol)
             vwap,
             support,
             resistance,
-            rsi,
+            rsi: intradayRsi,
             candleColor,
             gapOpenPct: gapData.gapOpenPct,
             volumeSpike: volumeData.volumeSpike,
-            volatilityPct: null,
+            volatilityPct,
             direction: intradayDirection
           });
           const intradayExecutionMeta = buildIntradayExecutionMeta({
@@ -356,28 +395,32 @@ const gapData = await fetchGapData(resolvedSymbol)
    SWING & LONG TERM
 ===================== */
 const swingView = evaluateSwing({
-  rsi,
+  rsi: swingRsi,
   gapOpenPct: gapData.gapOpenPct,
   gapNowPct: gapData.gapNowPct,
-  volumeSpike: volumeData.volumeSpike,
+  volumeSpike: swingVolumeData.volumeSpike,
   price: gapData.currentPrice,
   swingVWAP: swingVwap,
-  support,
-  resistance
+  support: swingSupport,
+  resistance: swingResistance
 })
 
 const swingEntryPlan = calculateSwingEntryPrice({
   price: gapData.currentPrice,
   marketCap: gapData.marketCap,
   swingVWAP: swingVwap,
-  support,
-  resistance,
-  rsi,
-  candleColor,
+  support: swingSupport,
+  resistance: swingResistance,
+  rsi: swingRsi,
+  candleColor: swingLastCandle && swingLastCandle.close > swingLastCandle.open
+    ? 'green'
+    : swingLastCandle && swingLastCandle.close < swingLastCandle.open
+    ? 'red'
+    : 'neutral',
   gapOpenPct: gapData.gapOpenPct,
   gapNowPct: gapData.gapNowPct,
-  volumeSpike: volumeData.volumeSpike,
-  volatilityPct
+  volumeSpike: swingVolumeData.volumeSpike,
+  volatilityPct: swingVolatilityPct
 })
 
 const fundamentals = await fetchFundamentals(resolvedSymbol)
@@ -394,7 +437,7 @@ const marketPosition =
   'emerging'
 
 const longTermView = evaluateLongTerm({
-  rsi,
+  rsi: swingRsi,
   marketCap: gapData.marketCap,
   fundamentals: {
     ...fundamentals,
@@ -483,7 +526,8 @@ const longTermView = evaluateLongTerm({
             marketCap: gapData.marketCap ?? null,
             priceSource: gapData.priceSource,
 
-            rsi,
+            rsi: swingRsi,
+            intradayRsi,
             rsiCategory,
             rsiBias,
             candleColor,
@@ -493,6 +537,8 @@ const longTermView = evaluateLongTerm({
             swingVwap,
             support,
             resistance,
+            swingSupport,
+            swingResistance,
             breakout,
 
             news: topNews
@@ -528,7 +574,8 @@ const longTermView = evaluateLongTerm({
               resolvedSymbol
             },
             technicals: {
-              rsi,
+              rsi: swingRsi,
+              intradayRsi,
               rsiCategory,
               rsiBias,
               candleColor,

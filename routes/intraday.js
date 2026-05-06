@@ -4,7 +4,8 @@ import {
   detectVolumeSpike,
   calculateIntradayVWAP,
   supportResistance,
-  estimateATRPercent
+  estimateATRPercent,
+  selectIntradaySessionCandles
 } from '../services/technicalIndicators.js';
 import { computeRSI } from '../services/rsiCalculator.js';
 import { evaluateIntraday, calculateIntradayEntryPrice } from '../services/positionEvaluator.js';
@@ -114,14 +115,16 @@ async function deepScanSymbol(symbol) {
       { interval: '5m', range: '5d' }
     );
     const technicalCandles = selectCandlesForTechnicals(candles, 20);
-    const closes = technicalCandles.map(c => c.close);
-    const lastCandle = technicalCandles[technicalCandles.length - 1] || candles[candles.length - 1];
+    const intradaySessionCandles = selectIntradaySessionCandles(technicalCandles);
+    const intradayRsiCandles = intradaySessionCandles.length >= 15 ? intradaySessionCandles : technicalCandles;
+    const closes = intradayRsiCandles.map(c => c.close);
+    const lastCandle = intradaySessionCandles[intradaySessionCandles.length - 1] || technicalCandles[technicalCandles.length - 1] || candles[candles.length - 1];
     const rsi = computeRSI(closes, 14);
     
-    const volumeData = detectVolumeSpike(technicalCandles);
-    const vwap = calculateIntradayVWAP(technicalCandles);
-    const { support, resistance } = supportResistance(technicalCandles);
-    const volatilityPct = estimateATRPercent(technicalCandles, 14);
+    const volumeData = detectVolumeSpike(intradaySessionCandles);
+    const vwap = calculateIntradayVWAP(intradaySessionCandles);
+    const { support, resistance } = supportResistance(intradaySessionCandles);
+    const volatilityPct = estimateATRPercent(intradaySessionCandles, 14);
     
     const candleColor = lastCandle
       ? (lastCandle.close > lastCandle.open ? 'green' : lastCandle.close < lastCandle.open ? 'red' : 'neutral')
@@ -420,8 +423,10 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             { interval: '5m', range: '5d' }
           );
           const technicalCandles = selectCandlesForTechnicals(candles, Math.max(20, effectiveRSIPeriod + 1));
-          const closes = technicalCandles.map(c => c.close);
-          const lastCandle = technicalCandles[technicalCandles.length - 1] || candles[candles.length - 1];
+          const intradaySessionCandles = selectIntradaySessionCandles(technicalCandles);
+          const intradayRsiCandles = intradaySessionCandles.length >= effectiveRSIPeriod + 1 ? intradaySessionCandles : technicalCandles;
+          const closes = intradayRsiCandles.map(c => c.close);
+          const lastCandle = intradaySessionCandles[intradaySessionCandles.length - 1] || technicalCandles[technicalCandles.length - 1] || candles[candles.length - 1];
 
           /* =====================
              RSI
@@ -431,10 +436,10 @@ router.post('/', intradayScanLimiter, async (req, res) => {
           /* =====================
              TECHNICALS
           ====================== */
-          const volumeData = detectVolumeSpike(technicalCandles);
-          const vwap = calculateIntradayVWAP(technicalCandles);
-          const { support, resistance } = supportResistance(technicalCandles);
-          const volatilityPct = estimateATRPercent(technicalCandles, 14);
+          const volumeData = detectVolumeSpike(intradaySessionCandles);
+          const vwap = calculateIntradayVWAP(intradaySessionCandles);
+          const { support, resistance } = supportResistance(intradaySessionCandles);
+          const volatilityPct = estimateATRPercent(intradaySessionCandles, 14);
 
           const candleColor =
             lastCandle && lastCandle.close > lastCandle.open
