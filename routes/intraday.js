@@ -286,14 +286,17 @@ function buildIntradayExecutionMeta({ marketState, intradayView, entryPriceData,
   const riskReward = Number.parseFloat(entryPriceData?.riskReward);
   const hasValidRr = Number.isFinite(riskReward) && riskReward >= 1;
   const entryType = entryPriceData?.entryType || 'invalid';
+  const isWatchPhase = intradayView?.setupPhase === 'watch';
   const qualifies =
     marketState?.isOpen &&
     ['positive', 'negative'].includes(intradayView?.sentiment) &&
+    !isWatchPhase &&
     !['scalp_only', 'rr_weak', 'invalid'].includes(entryType) &&
     hasValidRr;
 
   let blockerReason = null;
   if (!marketState?.isOpen) blockerReason = marketState?.reason || 'market_closed';
+  else if (isWatchPhase) blockerReason = intradayView?.blockerReason || 'watch_setup';
   else if (entryType === 'scalp_only') blockerReason = 'scalp_only';
   else if (entryType === 'rr_weak') blockerReason = 'rr_weak';
   else if (entryType === 'invalid') blockerReason = 'invalid_entry_plan';
@@ -520,6 +523,7 @@ router.post('/', intradayScanLimiter, async (req, res) => {
             biasDirection: executionMeta.biasDirection,
             executionDirection: executionMeta.executionDirection,
             blockerReason: executionMeta.blockerReason,
+            setupPhase: intradayView?.setupPhase || 'ready',
             
             // Entry price information
             entryPrice: entryPriceData.entryPrice,

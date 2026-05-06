@@ -506,20 +506,26 @@ export async function fastMarketScan() {
         Number.isFinite(dayHigh) && Number.isFinite(dayLow) && Number.isFinite(prevClose) && prevClose > 0
           ? ((dayHigh - dayLow) / prevClose) * 100
           : movement
-      const nearHighScore =
-        Number.isFinite(dayHigh) && dayHigh > 0 ? 1 - Math.min(Math.max((dayHigh - price) / dayHigh, 0), 1) : 0.5
-
       const side = changePct >= 0 ? 'long' : 'short'
       const directionalBias = Math.abs(changePct)
       const participationScore = movement * Math.sqrt(Math.max(volume, 1))
+      const directionalStructureScore = (() => {
+        if (!Number.isFinite(dayHigh) || !Number.isFinite(dayLow) || dayHigh <= dayLow) return 0.5
+        const rangePosition = (price - dayLow) / (dayHigh - dayLow)
+        const clamped = Math.min(Math.max(rangePosition, 0), 1)
+        return side === 'short' ? 1 - clamped : clamped
+      })()
+      const directionalMoveFromOpen = side === 'short'
+        ? Math.max(-intradayMoveFromOpen, -2)
+        : Math.max(intradayMoveFromOpen, -2)
 
       const compositeScore =
         movement * 3.9 +
         Math.log10(Math.max(turnover, 1)) * 2.0 +
         directionalBias * 0.85 +
-        Math.max(intradayMoveFromOpen, -2) * 0.25 +
+        directionalMoveFromOpen * 0.25 +
         Math.max(dayRangePct, 0) * 0.35 +
-        nearHighScore * 1.4
+        directionalStructureScore * 1.4
 
       return {
         symbol,
@@ -531,7 +537,7 @@ export async function fastMarketScan() {
         participationScore,
         intradayMoveFromOpen,
         dayRangePct,
-        nearHighScore,
+        directionalStructureScore,
         side,
         compositeScore,
         gapPct: Number.isFinite(prevClose) && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : null

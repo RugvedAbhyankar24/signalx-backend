@@ -164,7 +164,10 @@ export function calculateRSI(prices, period = 14) {
   if (!Array.isArray(prices)) return 50;
 
   const closes = prices
-    .map(p => toFiniteNumber(p?.close))
+    .map(p => {
+      if (typeof p === 'number') return toFiniteNumber(p);
+      return toFiniteNumber(p?.close);
+    })
     .filter(v => v != null);
 
   if (closes.length < period + 1) {

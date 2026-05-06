@@ -195,12 +195,12 @@ function relevanceScore(n, symbol, meta) {
   let score = 0;
 
   // High-relevance exact matches
-  if (sym && title.includes(sym)) score += 15; // Increased from 8
-  if (company && title.includes(company)) score += 12; // Increased from 6
+  if (matchesEntity(title, sym)) score += 15;
+  if (matchesEntity(title, company)) score += 12;
   
   // Summary matches (less weight)
-  if (sym && summary.includes(sym)) score += 6; // Increased from 3
-  if (company && summary.includes(company)) score += 4; // Increased from 2
+  if (matchesEntity(summary, sym)) score += 6;
+  if (matchesEntity(summary, company)) score += 4;
 
   // Stock-specific keywords (positive indicators)
   const stockKeywords = ['stock', 'share', 'shares', 'price', 'market', 'trading', 'nse', 'bse', 'equity'];
@@ -227,6 +227,36 @@ function relevanceScore(n, symbol, meta) {
 
   // Minimum threshold for relevance
   return Math.max(0, score);
+}
+
+function normalizeEntityForMatch(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\.(ns|bo)$/i, '')
+    .replace(/[^a-z0-9&]+/g, ' ')
+    .trim();
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function matchesEntity(text, entity) {
+  const haystack = normalizeEntityForMatch(text);
+  const needle = normalizeEntityForMatch(entity);
+  if (!haystack || !needle) return false;
+  if (needle.length < 2) return false;
+
+  if (needle.length <= 3 || needle.includes('&')) {
+    const compactHaystack = haystack.replace(/\s+/g, '');
+    const compactNeedle = needle.replace(/\s+/g, '');
+    if (!compactNeedle) return false;
+    const compactRegex = new RegExp(`(^|[^a-z0-9])${escapeRegex(compactNeedle)}([^a-z0-9]|$)`);
+    return compactRegex.test(compactHaystack);
+  }
+
+  const regex = new RegExp(`(^|\\b)${escapeRegex(needle).replace(/\s+/g, '\\s+')}(\\b|$)`);
+  return regex.test(haystack);
 }
 
 /* ===========================

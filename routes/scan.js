@@ -173,14 +173,17 @@ function buildIntradayExecutionMeta({ marketState, intradayView, entryPlan, fall
   const riskReward = Number.parseFloat(entryPlan?.riskReward);
   const hasValidRr = Number.isFinite(riskReward) && riskReward >= 1;
   const entryType = entryPlan?.entryType || 'invalid';
+  const isWatchPhase = intradayView?.setupPhase === 'watch';
   const qualifies =
     marketState?.isOpen &&
     ['positive', 'negative'].includes(intradayView?.sentiment) &&
+    !isWatchPhase &&
     !['scalp_only', 'rr_weak', 'invalid'].includes(entryType) &&
     hasValidRr;
 
   let blockerReason = null;
   if (!marketState?.isOpen) blockerReason = marketState?.reason || 'market_closed';
+  else if (isWatchPhase) blockerReason = intradayView?.blockerReason || 'watch_setup';
   else if (entryType === 'scalp_only') blockerReason = 'scalp_only';
   else if (entryType === 'rr_weak') blockerReason = 'rr_weak';
   else if (entryType === 'invalid') blockerReason = 'invalid_entry_plan';
@@ -486,6 +489,7 @@ const longTermView = evaluateLongTerm({
                 biasDirection: intradayExecutionMeta.biasDirection,
                 executionDirection: null,
                 blockerReason: intradayExecutionMeta.blockerReason,
+                setupPhase: intradayView?.setupPhase || 'ready',
                 reason: marketState.isOpen
                   ? (intradayView?.reasons?.[0] || intradayView?.label || 'No intraday edge')
                   : 'Intraday execution is only active during market hours.'

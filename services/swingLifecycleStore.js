@@ -6,6 +6,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
 const STORE_PATH = path.join(DATA_DIR, 'swingLifecycle.json');
+const NSE_HOLIDAYS = new Set(
+  String(process.env.NSE_HOLIDAYS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
 
 function getISTDateString(now = new Date()) {
   const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -23,6 +29,10 @@ function isWeekend(dateString) {
   return day === 0 || day === 6;
 }
 
+function isTradingHoliday(dateString) {
+  return NSE_HOLIDAYS.has(dateString);
+}
+
 function countTradingDaysInclusive(startDate, endDate) {
   if (!startDate || !endDate) return 1;
   let cursor = new Date(`${startDate}T00:00:00+05:30`);
@@ -32,8 +42,8 @@ function countTradingDaysInclusive(startDate, endDate) {
 
   let count = 0;
   while (cursor <= end) {
-    const day = cursor.getUTCDay();
-    if (day !== 0 && day !== 6) count += 1;
+    const dateString = getISTDateString(cursor);
+    if (!isWeekend(dateString) && !isTradingHoliday(dateString)) count += 1;
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return Math.max(count, 1);
@@ -207,7 +217,7 @@ export async function applySwingLifecycle(stocks) {
     };
   });
 
-  if (!isWeekend(tradeDate)) {
+  if (!isWeekend(tradeDate) && !isTradingHoliday(tradeDate)) {
     store.lastUpdatedDate = tradeDate;
     store.symbols = nextSymbols;
     await writeStore(store);

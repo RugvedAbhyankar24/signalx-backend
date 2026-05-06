@@ -33,10 +33,15 @@ export function evaluateSwing({
   const aboveStructure = price > swingVWAP
   const breakoutConfirmed = getBreakoutConfirmation(resistance, price, volumeSpike)
   const nearSupport = support && price <= support * 1.05
+  const nearResistance = resistance && price >= resistance * 0.985
   const volumeOK = volumeSpike || (price > swingVWAP && rsi > 50)
   const effectiveGap = Number.isFinite(gapNowPct)
     ? gapNowPct
     : (Number.isFinite(gapOpenPct) ? gapOpenPct : 0)
+  const structureExtensionPct =
+    Number.isFinite(price) && Number.isFinite(swingVWAP) && swingVWAP > 0
+      ? ((price - swingVWAP) / swingVWAP) * 100
+      : null
 
   // Hard blockers for institutional swing quality
   if (effectiveGap <= -4.0) {
@@ -71,6 +76,26 @@ export function evaluateSwing({
       label: 'Large Gap – Avoid Swing',
       sentiment: 'negative',
       reasons: ['Large event-driven gap without volume confirmation']
+    }
+  }
+
+  if (
+    Number.isFinite(structureExtensionPct) &&
+    structureExtensionPct >= 7.5 &&
+    !breakoutConfirmed
+  ) {
+    return {
+      label: 'Extended Above Structure – Wait',
+      sentiment: 'negative',
+      reasons: ['Price is too extended above swing VWAP for an efficient fresh swing entry']
+    }
+  }
+
+  if (nearResistance && !breakoutConfirmed && !volumeSpike) {
+    return {
+      label: 'Under Resistance – Needs Breakout',
+      sentiment: 'neutral',
+      reasons: ['Price is pressing resistance without decisive breakout participation']
     }
   }
 
@@ -547,12 +572,14 @@ export function evaluateLongTerm({ rsi, marketCap, fundamentals }) {
     fundamentals?.debtToEquity,
     fundamentals?.roe
   ].filter(Number.isFinite).length
+  const hasGrowthEvidence = Number.isFinite(fundamentals?.revenueGrowth) || Number.isFinite(fundamentals?.profitGrowth)
+  const hasQualityEvidence = Number.isFinite(fundamentals?.debtToEquity) || Number.isFinite(fundamentals?.roe)
 
-  if (auditedMetricCount < 3) {
+  if (auditedMetricCount < 3 || !hasGrowthEvidence || !hasQualityEvidence) {
     return {
       label: 'Insufficient Fundamental Validation',
       sentiment: 'neutral',
-      reasons: ['Long-term conviction requires at least three validated fundamental fields']
+      reasons: ['Long-term conviction requires validated growth and balance-sheet/profitability evidence']
     }
   }
 
@@ -1453,12 +1480,19 @@ export function evaluateIntraday({
   const effectiveGap = (gapNowPct ?? gapOpenPct ?? 0)
   const volumeOK = volumeSpike || (aboveVWAP && rsi > 50)
   const sellVolumeOK = volumeSpike || (belowVWAP && rsi < 50)
+  const vwapDistancePct = hasVwap ? Math.abs(((price - vwap) / vwap) * 100) : null
+  const trappedInRange =
+    nearSupport &&
+    nearResistance &&
+    !breakoutConfirmed &&
+    !breakdownConfirmed
   const buildIntradayView = ({
     label,
     sentiment,
     biasDirection = 'long',
     executionDirection = null,
     blockerReason = null,
+    setupPhase = 'ready',
     reasons: viewReasons
   }) => ({
     label,
@@ -1467,6 +1501,7 @@ export function evaluateIntraday({
     biasDirection,
     executionDirection,
     blockerReason,
+    setupPhase,
     reasons: viewReasons
   })
 
@@ -1484,6 +1519,69 @@ export function evaluateIntraday({
       biasDirection: 'long',
       executionDirection: null,
       blockerReason: 'choppy_market',
+      reasons
+    })
+  }
+
+  if (trappedInRange && !volumeSpike) {
+    reasons.push('Price is trapped between nearby support and resistance')
+    reasons.push('No breakout or breakdown participation yet')
+    return buildIntradayView({
+      label: 'Range-Bound – Wait',
+      sentiment: 'neutral',
+      executionDirection: null,
+      blockerReason: 'range_bound',
+      setupPhase: 'watch',
+      reasons
+    })
+  }
+
+  if (
+    Number.isFinite(vwapDistancePct) &&
+    vwapDistancePct >= 1.8 &&
+    !volumeSpike &&
+    !breakoutConfirmed &&
+    !breakdownConfirmed
+  ) {
+    const directionalBias = aboveVWAP ? 'long' : belowVWAP ? 'short' : 'long'
+    const directionalSentiment = belowVWAP ? 'negative' : 'positive'
+    reasons.push('Price is stretched too far from session VWAP')
+    reasons.push('The setup is strong enough to track, but not efficient for immediate execution')
+    return buildIntradayView({
+      label: directionalBias === 'short' ? 'Short Setup – Wait for Pullback' : 'Long Setup – Wait for Pullback',
+      sentiment: directionalSentiment,
+      biasDirection: directionalBias,
+      executionDirection: null,
+      blockerReason: 'extended_from_vwap',
+      setupPhase: 'watch',
+      reasons
+    })
+  }
+
+  if (aboveVWAP && nearResistance && !breakoutConfirmed && !volumeSpike) {
+    reasons.push('Upside structure is present, but resistance is overhead')
+    reasons.push('Watch for breakout confirmation or a cleaner retest before immediate entry')
+    return buildIntradayView({
+      label: 'Long Setup – Trigger Building',
+      sentiment: 'positive',
+      biasDirection: 'long',
+      executionDirection: null,
+      blockerReason: 'near_resistance',
+      setupPhase: 'watch',
+      reasons
+    })
+  }
+
+  if (belowVWAP && nearSupport && !breakdownConfirmed && !volumeSpike) {
+    reasons.push('Weak structure is present, but support is close underneath')
+    reasons.push('Watch for breakdown confirmation or a weak retest before immediate short entry')
+    return buildIntradayView({
+      label: 'Short Setup – Trigger Building',
+      sentiment: 'negative',
+      biasDirection: 'short',
+      executionDirection: null,
+      blockerReason: 'near_support',
+      setupPhase: 'watch',
       reasons
     })
   }
