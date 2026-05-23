@@ -7,6 +7,9 @@ const router = express.Router()
 /* ─────────────────────────────────────────────
    CONFIG
 ───────────────────────────────────────────── */
+// No longer used for domain-restricting the RSS query — fetchFromGoogleNews
+// now searches open-web and deduplicates across queries.
+// Kept here only as the `trustedOnly` source-name filter for the watchlist display.
 const TRUSTED_NEWS_DOMAINS = [
   'moneycontrol.com',
   'economictimes.indiatimes.com',
@@ -17,6 +20,11 @@ const TRUSTED_NEWS_DOMAINS = [
   'financialexpress.com',
   'thehindubusinessline.com',
   'ndtvprofit.com',
+  'zeebiz.com',
+  'businesstoday.in',
+  'bqprime.com',
+  'investing.com',
+  'theprint.in',
 ]
 
 const WATCHLIST_UNIVERSE = [
@@ -170,13 +178,14 @@ async function fetchCompanyNewsSafe(company, marketState) {
         includeMeta: false,
         companyName: company.companyName,
         aliases: company.aliases,
-        includeSymbolAlias: false,
-        domains: TRUSTED_NEWS_DOMAINS,
+        // Open-web RSS fetch — no domain restriction (handled in newsService).
+        // trustedOnly filters the *results* by source name so watchlist only
+        // surfaces credible outlets, without limiting which sources we search.
         trustedOnly: true,
         strictEntity: true,
         requireHeadlineAlias: true,
         requireCatalyst: true,
-        maxAgeHours: 120,
+        maxAgeHours: 72,           // tightened: 3 days matches scorer's primary window
       })
       const topNews = items[0]
       if (!topNews) return null
@@ -299,23 +308,41 @@ router.get('/', async (req, res) => {
   }
 })
 
-// GET /api/news/watchlist
+// GET /api/news/watchlist?force=true  → busts cache, waits for fresh build
+// GET /api/news/watchlist             → stale-while-revalidate (normal path)
 router.get('/watchlist', async (req, res) => {
   const marketState = getIndianMarketState()
   const now = Date.now()
+  const force = req.query.force === 'true'
+
+  // Force-refresh: invalidate cache and rebuild synchronously
+  if (force) {
+    watchlistCache.value = null
+    watchlistCache.expiresAt = 0
+    watchlistCache.sessionKey = null
+    if (watchlistInFlight) {
+      // A rebuild is already running — wait for it rather than spawning another
+      try {
+        const payload = await watchlistInFlight
+        return res.json({ ...payload, stale: false, forced: true })
+      } catch (e) {
+        return res.status(500).json({ error: e.message || 'Refresh failed' })
+      }
+    }
+  }
 
   // ① Fresh cache — serve immediately
-  if (cacheIsValid(marketState, now)) {
+  if (!force && cacheIsValid(marketState, now)) {
     return res.json({ ...watchlistCache.value, stale: false })
   }
 
   // ② Stale cache — serve stale immediately and rebuild in background
-  if (cacheIsStale(marketState)) {
+  if (!force && cacheIsStale(marketState)) {
     triggerBackgroundRefresh(marketState)
     return res.json({ ...watchlistCache.value, stale: true })
   }
 
-  // ③ No cache at all — build now (first ever request or server restart)
+  // ③ No cache (or force=true) — build now
   try {
     if (!watchlistInFlight) {
       watchlistInFlight = buildNewsWatchlist(marketState).finally(() => {
@@ -326,7 +353,7 @@ router.get('/watchlist', async (req, res) => {
     watchlistCache.value = payload
     watchlistCache.sessionKey = marketState.session
     watchlistCache.expiresAt = now + marketState.refreshMs
-    res.json({ ...payload, stale: false })
+    res.json({ ...payload, stale: false, ...(force && { forced: true }) })
   } catch (e) {
     console.error('[newsWatchlist] cold build failed:', e.message)
     res.status(500).json({ error: e.message || 'failed to build watchlist' })

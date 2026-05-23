@@ -2,13 +2,15 @@ import fetch from 'node-fetch';
 import { fetchCompanyMeta } from './marketData.js';
 
 // Canonical fragments — a source is trusted if its name contains ANY of these (case-insensitive).
-// This handles Google RSS variants like "Mint" vs "Livemint", "CNBC" vs "CNBCTV18", etc.
+// Kept broad so mid/small cap NSE 500 stocks covered by regional outlets still get the boost.
 const TRUSTED_SOURCE_FRAGMENTS = [
   'moneycontrol',
   'economic times',
+  'economictimes',
   'livemint',
   'mint',
   'business standard',
+  'businessstandard',
   'cnbctv18',
   'cnbc tv18',
   'cnbc',
@@ -18,6 +20,20 @@ const TRUSTED_SOURCE_FRAGMENTS = [
   'hindu businessline',
   'ndtv profit',
   'ndtvprofit',
+  'zeebiz',
+  'zee business',
+  'business today',
+  'businesstoday',
+  'bq prime',
+  'bqprime',
+  'bloomberg',
+  'investing.com',
+  'the print',
+  'theprint',
+  'hindu',
+  'press trust',
+  'pti',
+  'ani',
 ]
 const CATALYST_KEYWORDS = [
   'results', 'earnings', 'profit', 'loss', 'revenue', 'ebitda', 'margin',
@@ -59,11 +75,19 @@ export async function fetchCompanyNews(symbol, options = {}) {
   const googleItems = await fetchFromGoogleNews(symbol, meta, options);
 
   const filtered = filterAndSortNews(googleItems, symbol, meta);
-  const deduped = dedupeNews(filtered)
-  const verified = applyNewsOptions(deduped, symbol, meta, options)
+  const deduped = dedupeNews(filtered);
+  const verified = applyNewsOptions(deduped, symbol, meta, options);
 
-  // Always return 3–5 items if available
-  return verified.slice(0, Math.min(5, Math.max(3, verified.length)));
+  // Return top 5 price-moving stories.
+  // `verified` has already been scored, threshold-filtered, and time-gated.
+  // If options (requireCatalyst, trustedOnly, etc.) further narrow to <5,
+  // fall back to the threshold-filtered list — still entity-verified, just less strict.
+  if (verified.length >= 5) return verified.slice(0, 5);
+  if (verified.length > 0)  return verified; // return what we have if < 5
+
+  // Last resort: return scored+time-gated items that passed the entity gate
+  // but may not have passed optional filters — still no hallucinations.
+  return deduped.slice(0, 5);
 }
 
 /**
@@ -103,63 +127,38 @@ export function classifySentiment(text) {
    GOOGLE NEWS RSS
 =========================== */
 
-async function fetchFromGoogleNews(symbol, meta, options = {}) {
-  const qBase = String(symbol).trim().toUpperCase().replace(/\.(NS|BO)$/i, '');
-  const company = String(options.companyName || meta?.companyName || '').trim();
-  const aliases = Array.from(
-    new Set(
-      [company, ...(Array.isArray(options.aliases) ? options.aliases : [])]
-        .map((value) => String(value || '').trim())
-        .filter(Boolean)
-    )
-  )
-  const trustedDomainClause = (Array.isArray(options.domains) ? options.domains : []).length
-    ? options.domains.map((domain) => `site:${domain}`).join(' OR ')
-    : 'site:moneycontrol.com OR site:economictimes.indiatimes.com OR site:livemint.com OR site:business-standard.com'
+// Heavy-movement catalyst terms — these events cause the biggest price swings
+const HEAVY_CATALYST_TERMS =
+  'results OR earnings OR profit OR loss OR order OR deal OR acquisition OR merger OR ' +
+  'penalty OR dividend OR buyback OR upgrade OR downgrade OR block deal OR bulk deal OR ' +
+  'fundraise OR approval OR capex OR investigation OR default OR stake OR guidance OR ' +
+  'SEBI OR ED OR CBI OR FIR OR shareholding OR promoter OR FII OR DII';
 
-  const primaryName = aliases[0] || company || qBase
-  const queries = [
-    `"${primaryName}" (${trustedDomainClause})`,
-    `"${primaryName}" (results OR earnings OR order OR deal OR dividend OR upgrade OR downgrade) (${trustedDomainClause})`,
-    company && company !== primaryName ? `"${company}" (${trustedDomainClause})` : null,
-    aliases.find((alias) => alias.length <= 5) ? `"${aliases.find((alias) => alias.length <= 5)}" "${primaryName}" (${trustedDomainClause})` : null,
-    `"${qBase}" "${primaryName}" (${trustedDomainClause})`,
-  ].filter(Boolean);
+/**
+ * Fetches a single Google News RSS query and returns parsed items.
+ * Returns [] on any failure — callers aggregate from multiple queries.
+ */
+async function fetchRSS(q) {
+  const url =
+    `https://news.google.com/rss/search?` +
+    new URLSearchParams({ q, hl: 'en-IN', gl: 'IN', ceid: 'IN:en' }).toString();
 
-  for (const q of queries) {
-    const rssUrl =
-      `https://news.google.com/rss/search?` +
-      new URLSearchParams({
-        q,
-        hl: 'en-IN',
-        gl: 'IN',
-        ceid: 'IN:en',
-      }).toString();
-
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 8000)
-    let res
-    try {
-      res = await fetch(rssUrl, {
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-          'Accept': 'application/rss+xml, application/xml',
-          'Accept-Language': 'en-IN,en;q=0.9',
-          'Cache-Control': 'no-cache, no-store',
-          'Pragma': 'no-cache',
-        },
-      })
-    } catch (fetchErr) {
-      clearTimeout(timeoutId)
-      continue
-    }
-    clearTimeout(timeoutId)
-
-    if (!res.ok) continue;
-
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        Accept: 'application/rss+xml, application/xml, */*',
+        'Accept-Language': 'en-IN,en;q=0.9',
+        'Cache-Control': 'no-cache',
+      },
+    });
+    if (!res.ok) return [];
     const xml = await res.text();
-    const items = parseGoogleRss(xml).map((it) => ({
+    return parseGoogleRss(xml).map((it) => ({
       headline: it.title,
       summary: it.snippet,
       url: it.link,
@@ -169,10 +168,57 @@ async function fetchFromGoogleNews(symbol, meta, options = {}) {
         : Math.floor(Date.now() / 1000),
       keywords: extractKeywords(`${it.title || ''} ${it.snippet || ''}`),
     }));
-
-    if (items.length) return items;
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(tid);
   }
-  return [];
+}
+
+async function fetchFromGoogleNews(symbol, meta, options = {}) {
+  const qBase = String(symbol).trim().toUpperCase().replace(/\.(NS|BO)$/i, '');
+  const company = String(options.companyName || meta?.companyName || '').trim();
+
+  // Build the best entity string to search for.
+  // Prefer full company name (e.g. "HDFC Bank") over raw symbol ("HDFCBANK")
+  // because that's what headlines use.
+  const primaryName = company || qBase;
+
+  // Two parallel queries — open-web, no domain restriction:
+  //
+  // Q1: Broad — catches ALL recent coverage of this company from any source.
+  //     Relies on entity gate in scoring to drop unrelated articles.
+  //
+  // Q2: Catalyst-focused — forces at least one heavy-movement keyword.
+  //     Surfaces earnings, orders, penalties, deals even from small outlets
+  //     that don't rank highly in general search.
+  //
+  // Both run simultaneously; results are merged and deduplicated by headline.
+  // Scoring + entity gate decide what actually surfaces in the final output.
+  const q1 = `"${primaryName}"`;
+  const q2 = `"${primaryName}" (${HEAVY_CATALYST_TERMS})`;
+
+  // For short/ambiguous symbols (≤4 chars like "ITC", "LT"), add the NSE suffix
+  // as a disambiguation hint so we don't pick up unrelated companies.
+  const q3 = qBase.length <= 4 && company
+    ? `"${primaryName}" NSE OR BSE`
+    : null;
+
+  const fetchJobs = [fetchRSS(q1), fetchRSS(q2)];
+  if (q3) fetchJobs.push(fetchRSS(q3));
+
+  const resultSets = await Promise.all(fetchJobs);
+
+  // Merge and deduplicate by normalised headline
+  const seen = new Map();
+  for (const items of resultSets) {
+    for (const item of items) {
+      const key = (item.headline || '').toLowerCase().trim();
+      if (key && !seen.has(key)) seen.set(key, item);
+    }
+  }
+
+  return [...seen.values()];
 }
 
 /* ===========================
@@ -182,58 +228,25 @@ async function fetchFromGoogleNews(symbol, meta, options = {}) {
 function filterAndSortNews(items, symbol, meta) {
   const arr = Array.isArray(items) ? items : [];
   const now = Math.floor(Date.now() / 1000);
+  const window72h = now - 72 * 3600;        // primary: 3 days (covers full weekend)
+  const window7d  = now - 7 * 24 * 3600;   // fallback: 7 days (low-coverage symbols)
 
-  const scored = arr
-    .map((n) => ({ 
-      item: n, 
-      score: relevanceScore(n, symbol, meta),
-      recencyScore: calculateRecencyScore(n.datetime || now, now)
+  // Time-gate first — score only items within the relevant window
+  const fresh = arr.filter(n => (n.datetime || now) >= window72h);
+  const pool  = fresh.length >= 3 ? fresh
+              : arr.filter(n => (n.datetime || now) >= window7d);
+
+  // Score threshold: 5 — requires at minimum a real entity match
+  const THRESHOLD = 5;
+
+  return pool
+    .map(n => ({
+      item: n,
+      total: relevanceScore(n, symbol, meta) + calculateRecencyScore(n.datetime || now, now),
     }))
-    .filter((x) => x.score >= 3); // Lowered threshold from 5 to 3
-
-  let strong = scored
-    .sort(
-      (a, b) => {
-        // Prioritize relevance first, then recency
-        const aTotal = a.score + a.recencyScore;
-        const bTotal = b.score + b.recencyScore;
-        
-        // First by total score (relevance + recency)
-        if (bTotal !== aTotal) return bTotal - aTotal;
-        
-        // Then by relevance score alone
-        if (b.score !== a.score) return b.score - a.score;
-        
-        // Finally by recency
-        return (b.item.datetime || 0) - (a.item.datetime || 0);
-      }
-    )
-    .map((x) => x.item);
-
-  // Filter out very old news (older than 14 days - increased from 7 days)
-  const fourteenDaysAgo = now - (14 * 24 * 60 * 60);
-  strong = strong.filter(item => (item.datetime || now) > fourteenDaysAgo);
-
-  // If we have less than 3 items, try to include more with lower relevance
-  if (strong.length < 3) {
-    const fallback = arr
-      .filter(item => (item.datetime || now) > fourteenDaysAgo)
-      .sort((a, b) => (b.datetime || 0) - (a.datetime || 0))
-      .slice(0, 5);
-    
-    // Combine high relevance with recent items to reach 5
-    const combined = [...strong];
-    for (const item of fallback) {
-      if (!combined.find(existing => existing.headline === item.headline)) {
-        combined.push(item);
-        if (combined.length >= 5) break;
-      }
-    }
-    return combined.slice(0, 5);
-  }
-
-  // Always return top 5 most relevant news
-  return strong.slice(0, 5);
+    .filter(x => x.total >= THRESHOLD)
+    .sort((a, b) => b.total - a.total)
+    .map(x => x.item);
 }
 
 function calculateRecencyScore(datetime, now) {
@@ -251,45 +264,54 @@ function calculateRecencyScore(datetime, now) {
 }
 
 function relevanceScore(n, symbol, meta) {
-  const title = (n.headline || '').toLowerCase();
-  const summary = (n.summary || '').toLowerCase();
-  const sym = String(symbol || '').toLowerCase().replace(/\.(ns|bo)$/i, '');
+  const title   = (n.headline || '').toLowerCase();
+  const summary = (n.summary  || '').toLowerCase();
+  const sym     = String(symbol || '').toLowerCase().replace(/\.(ns|bo)$/i, '');
   const company = (meta?.companyName || '').toLowerCase();
+
+  // ── Anti-hallucination gate ──────────────────────────────────────────────
+  // The article MUST mention this company or symbol somewhere.
+  // Without this hard gate, high catalyst-keyword density alone could push
+  // generic market roundups past the threshold.
+  const titleMatchesSym = sym     && matchesEntity(title,   sym);
+  const titleMatchesCo  = company && matchesEntity(title,   company);
+  const bodyMatchesSym  = sym     && matchesEntity(summary, sym);
+  const bodyMatchesCo   = company && matchesEntity(summary, company);
+
+  if (!titleMatchesSym && !titleMatchesCo && !bodyMatchesSym && !bodyMatchesCo) {
+    return 0; // not about this stock — hard zero, cannot be rescued by catalysts
+  }
 
   let score = 0;
 
-  // High-relevance exact matches
-  if (matchesEntity(title, sym)) score += 15;
-  if (matchesEntity(title, company)) score += 12;
-  
-  // Summary matches (less weight)
-  if (matchesEntity(summary, sym)) score += 6;
-  if (matchesEntity(summary, company)) score += 4;
+  // Entity match weight — title is a stronger signal than summary
+  if (titleMatchesCo)  score += 12;
+  if (titleMatchesSym) score += 10;
+  if (bodyMatchesCo)   score += 4;
+  if (bodyMatchesSym)  score += 2;
 
-  // Stock-specific keywords (positive indicators)
-  const stockKeywords = ['stock', 'share', 'shares', 'price', 'market', 'trading', 'nse', 'bse', 'equity'];
-  const stockKeywordMatches = stockKeywords.filter(keyword => title.includes(keyword)).length;
-  score += stockKeywordMatches * 3;
+  // Catalyst boost — capped so it adds colour, not overrides entity signal
+  const combined     = `${title} ${summary}`;
+  const catalystHits = CATALYST_KEYWORDS.filter(kw => combined.includes(kw)).length;
+  score += Math.min(catalystHits * 2, 10); // max +10 from catalysts
 
-  // Financial indicators
-  const financialKeywords = ['profit', 'loss', 'revenue', 'earnings', 'quarter', 'q1', 'q2', 'q3', 'q4', 'results', 'dividend'];
-  const financialKeywordMatches = financialKeywords.filter(keyword => title.includes(keyword)).length;
-  score += financialKeywordMatches * 2;
+  // Pre/post market relevance bonus
+  if (/pre.?market|before market|ahead of open/i.test(combined))  score += 2;
+  if (/post.?market|after.?hours|after close/i.test(combined))    score += 2;
 
-  // Strong negative penalties for generic market news
-  const genericTerms = [
-    'sensex', 'nifty 50', 'market today', 'global markets', 'stock market update',
-    'market analysis', 'indices', 'sector overview', 'market watch'
+  // Trusted source adds a small lift
+  if (isTrustedSource(n.source)) score += 2;
+
+  // Generic market noise penalty — even if the article mentions the company,
+  // "Top 10 stocks to watch" isn't actionable price news for this stock
+  const noiseTerms = [
+    'sensex', 'nifty 50', 'market today', 'global markets',
+    'stocks to buy', 'top gainers', 'top losers', 'market wrap',
+    'stock market update', 'market analysis', 'sector overview',
   ];
-  const genericMatches = genericTerms.filter(term => title.includes(term)).length;
-  score -= genericMatches * 8; // Increased penalty
+  const noiseHits = noiseTerms.filter(t => title.includes(t)).length;
+  score -= noiseHits * 5;
 
-  // Extra penalty if no stock-specific keywords found
-  if (stockKeywordMatches === 0 && financialKeywordMatches === 0) {
-    score -= 5;
-  }
-
-  // Minimum threshold for relevance
   return Math.max(0, score);
 }
 
@@ -453,16 +475,61 @@ function parseGoogleRss(xml) {
   const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
   let m;
   while ((m = itemRegex.exec(xml))) {
-    const block = m[1];
+    const block   = m[1];
+    const title   = decodeEntities(extractTag(block, 'title'));
+    const rawSnip = sanitizeSnippet(extractTag(block, 'description'));
+
+    // Google News RSS puts the headline (+ source name) into <description>.
+    // Detect and discard it so we never show a duplicate summary.
+    const snippet = isDuplicateSnippet(rawSnip, title) ? '' : rawSnip;
+
     out.push({
-      title: decodeEntities(extractTag(block, 'title')),
-      link: decodeEntities(extractTag(block, 'link')),
+      title,
+      link:    decodeEntities(extractTag(block, 'link')),
       pubDate: extractTag(block, 'pubDate'),
-      source: decodeEntities(extractTag(block, 'source')),
-      snippet: sanitizeSnippet(extractTag(block, 'description')),
+      source:  decodeEntities(extractTag(block, 'source')),
+      snippet,
     });
   }
   return out;
+}
+
+/**
+ * Returns true when the snippet is just a noisy echo of the headline.
+ * Google News RSS puts the headline + source name into <description>, e.g.:
+ *   title:   "NTPC Profit Zooms 38% - NDTV Profit"
+ *   snippet: "NTPC Profit Zooms 38% NDTV Profit"
+ * We normalise both (strip punctuation / source suffix) and compare.
+ */
+function isDuplicateSnippet(snippet, title) {
+  if (!snippet || !title) return false;
+
+  const normalise = (s) =>
+    s.toLowerCase()
+     .replace(/[-–—|·•]/g, ' ')   // separators often used before source name
+     .replace(/[^a-z0-9\s]/g, '')
+     .replace(/\s+/g, ' ')
+     .trim();
+
+  const ns = normalise(snippet);
+  const nt = normalise(title);
+
+  // Exact or near-exact match
+  if (ns === nt) return true;
+
+  // Snippet starts with the headline text (headline + source appended)
+  if (ns.startsWith(nt)) return true;
+
+  // Title starts with most of the snippet (snippet is a truncated headline)
+  if (nt.startsWith(ns) && ns.length > 20) return true;
+
+  // Levenshtein would be overkill — word-overlap ratio covers the rest
+  const titleWords   = new Set(nt.split(' ').filter(w => w.length > 3));
+  const snippetWords = ns.split(' ').filter(w => w.length > 3);
+  if (!snippetWords.length || !titleWords.size) return false;
+
+  const overlap = snippetWords.filter(w => titleWords.has(w)).length;
+  return overlap / snippetWords.length >= 0.80; // ≥80% words shared → duplicate
 }
 
 function extractTag(block, tag) {

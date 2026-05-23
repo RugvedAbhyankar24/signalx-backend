@@ -349,7 +349,10 @@ const gapData = await fetchGapData(resolvedSymbol)
           /* =====================
              NEWS SENTIMENT
           ====================== */
-          const news = await fetchCompanyNews(symbol);
+          const news = await fetchCompanyNews(symbol, {
+            companyName: gapData.companyName,  // critical for entity matching
+            includeMeta: false,                 // skip NSE meta call (403 on weekends)
+          });
           const topNews = news[0] || null;
 
           const sentiment = topNews
