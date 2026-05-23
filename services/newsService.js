@@ -1,21 +1,69 @@
 import fetch from 'node-fetch';
 import { fetchCompanyMeta } from './marketData.js';
 
+// Canonical fragments — a source is trusted if its name contains ANY of these (case-insensitive).
+// This handles Google RSS variants like "Mint" vs "Livemint", "CNBC" vs "CNBCTV18", etc.
+const TRUSTED_SOURCE_FRAGMENTS = [
+  'moneycontrol',
+  'economic times',
+  'livemint',
+  'mint',
+  'business standard',
+  'cnbctv18',
+  'cnbc tv18',
+  'cnbc',
+  'reuters',
+  'financial express',
+  'businessline',
+  'hindu businessline',
+  'ndtv profit',
+  'ndtvprofit',
+]
+const CATALYST_KEYWORDS = [
+  'results', 'earnings', 'profit', 'loss', 'revenue', 'ebitda', 'margin',
+  'order', 'deal', 'contract', 'approval', 'acquisition', 'merger', 'stake',
+  'block deal', 'bulk deal', 'dividend', 'bonus', 'buyback', 'guidance',
+  'target price', 'target', 'upgrade', 'downgrade', 'outperform', 'underperform',
+  'investigation', 'penalty', 'default', 'fund raise', 'fundraise', 'capex',
+  'shareholding', 'retail shareholding', 'promoter', 'fii', 'dii',
+  'launch', 'plant', 'expansion', 'q1', 'q2', 'q3', 'q4'
+]
+const GENERIC_BUZZ_PATTERNS = [
+  'short on capital to buy stocks',
+  'stocks to buy',
+  'share market',
+  'stock market',
+  'market wrap',
+  'top gainers',
+  'top losers',
+  'sensex',
+  'nifty',
+  'mutual fund',
+  'ipo',
+  'drhp',
+  'draft red herring prospectus',
+  'red herring prospectus',
+  'how to',
+  'explained',
+]
+
 /* ===========================
    PUBLIC API
 =========================== */
 
-export async function fetchCompanyNews(symbol) {
-  const meta = await safeCompanyMeta(symbol);
+export async function fetchCompanyNews(symbol, options = {}) {
+  const shouldLoadMeta = options.includeMeta !== false;
+  const meta = shouldLoadMeta ? await safeCompanyMeta(symbol) : null;
 
   // Primary: Google News RSS (no API keys, stable)
-  const googleItems = await fetchFromGoogleNews(symbol, meta);
+  const googleItems = await fetchFromGoogleNews(symbol, meta, options);
 
   const filtered = filterAndSortNews(googleItems, symbol, meta);
-  const deduped = dedupeNews(filtered);
+  const deduped = dedupeNews(filtered)
+  const verified = applyNewsOptions(deduped, symbol, meta, options)
 
   // Always return 3–5 items if available
-  return deduped.slice(0, Math.min(5, Math.max(3, deduped.length)));
+  return verified.slice(0, Math.min(5, Math.max(3, verified.length)));
 }
 
 /**
@@ -28,12 +76,18 @@ export function classifySentiment(text) {
   const t = text.toLowerCase();
 
   const positive = [
-    'beats', 'surges', 'record profit', 'strong growth',
-    'upgrade', 'outperform', 'rallies', 'profit jumps'
+    'beats', 'surges', 'record profit', 'strong growth', 'strong results',
+    'upgrade', 'outperform', 'rallies', 'profit jumps', 'profit rises',
+    'net profit up', 'revenue up', 'revenue rises', 'buys stake', 'wins order',
+    'bags order', 'secures deal', 'dividend declared', 'buyback', 'strong demand',
+    'all-time high', 'multibagger', 'target raised',
   ];
   const negative = [
-    'misses', 'probe', 'fraud', 'downgrade',
-    'loss widens', 'plunge', 'defaults', 'investigation'
+    'misses', 'probe', 'fraud', 'downgrade', 'underperform',
+    'loss widens', 'net loss', 'plunge', 'plunges', 'defaults', 'investigation',
+    'penalty', 'fine imposed', 'sebi notice', 'ed probe', 'cbi probe',
+    'revenue falls', 'profit falls', 'profit declines', 'write-off', 'write off',
+    'margin pressure', 'debt rises', 'rating downgrade', 'rating cut',
   ];
 
   let score = 0;
@@ -49,27 +103,27 @@ export function classifySentiment(text) {
    GOOGLE NEWS RSS
 =========================== */
 
-async function fetchFromGoogleNews(symbol, meta) {
+async function fetchFromGoogleNews(symbol, meta, options = {}) {
   const qBase = String(symbol).trim().toUpperCase().replace(/\.(NS|BO)$/i, '');
-  const company = (meta?.companyName || '').trim();
-  const industry = (meta?.industry || '').trim();
+  const company = String(options.companyName || meta?.companyName || '').trim();
+  const aliases = Array.from(
+    new Set(
+      [company, ...(Array.isArray(options.aliases) ? options.aliases : [])]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    )
+  )
+  const trustedDomainClause = (Array.isArray(options.domains) ? options.domains : []).length
+    ? options.domains.map((domain) => `site:${domain}`).join(' OR ')
+    : 'site:moneycontrol.com OR site:economictimes.indiatimes.com OR site:livemint.com OR site:business-standard.com'
 
-  // More comprehensive queries for different stock types
+  const primaryName = aliases[0] || company || qBase
   const queries = [
-    // Primary: Exact symbol match
-    `"${qBase}" stock news site:moneycontrol.com OR site:economictimes.indiatimes.com OR site:livemint.com OR site:business-standard.com`,
-    // Company name variations
-    company ? `"${company}" stock news` : null,
-    company ? `"${company}" share price` : null,
-    // Symbol variations (for stocks like VBL)
-    `${qBase} shares news`,
-    `${qBase} stock price`,
-    // Common variations for beverage companies (since VBL is Varun Beverages)
-    qBase === 'VBL' ? 'Varun Beverages stock news' : null,
-    qBase === 'VBL' ? 'Varun Beverages share price' : null,
-    // Broader searches if specific ones fail
-    `${qBase} company news`,
-    company ? `${company} quarterly results` : null,
+    `"${primaryName}" (${trustedDomainClause})`,
+    `"${primaryName}" (results OR earnings OR order OR deal OR dividend OR upgrade OR downgrade) (${trustedDomainClause})`,
+    company && company !== primaryName ? `"${company}" (${trustedDomainClause})` : null,
+    aliases.find((alias) => alias.length <= 5) ? `"${aliases.find((alias) => alias.length <= 5)}" "${primaryName}" (${trustedDomainClause})` : null,
+    `"${qBase}" "${primaryName}" (${trustedDomainClause})`,
   ].filter(Boolean);
 
   for (const q of queries) {
@@ -82,15 +136,25 @@ async function fetchFromGoogleNews(symbol, meta) {
         ceid: 'IN:en',
       }).toString();
 
-    const res = await fetch(rssUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'application/rss+xml, application/xml',
-        'Accept-Language': 'en-IN,en;q=0.9',
-        'Cache-Control': 'no-cache, no-store',
-        'Pragma': 'no-cache'
-      },
-    });
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 8000)
+    let res
+    try {
+      res = await fetch(rssUrl, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'Accept': 'application/rss+xml, application/xml',
+          'Accept-Language': 'en-IN,en;q=0.9',
+          'Cache-Control': 'no-cache, no-store',
+          'Pragma': 'no-cache',
+        },
+      })
+    } catch (fetchErr) {
+      clearTimeout(timeoutId)
+      continue
+    }
+    clearTimeout(timeoutId)
 
     if (!res.ok) continue;
 
@@ -229,6 +293,82 @@ function relevanceScore(n, symbol, meta) {
   return Math.max(0, score);
 }
 
+function applyNewsOptions(items, symbol, meta, options = {}) {
+  let result = Array.isArray(items) ? [...items] : []
+
+  if (Number.isFinite(options.maxAgeHours)) {
+    const maxAgeSeconds = Number(options.maxAgeHours) * 3600
+    const now = Math.floor(Date.now() / 1000)
+    result = result.filter((item) => !item?.datetime || (now - Number(item.datetime)) <= maxAgeSeconds)
+  }
+
+  if (options.trustedOnly) {
+    result = result.filter((item) => isTrustedSource(item.source))
+  }
+
+  if (options.strictEntity) {
+    const aliases = buildEntityAliases(symbol, meta, options)
+    result = result.filter((item) => isEntityVerifiedItem(item, aliases, options))
+  }
+
+  if (options.requireCatalyst) {
+    result = result.filter((item) => hasCatalyst(`${item.headline || ''} ${item.summary || ''}`))
+  }
+
+  if (result.length === 0 && options.strictEntity) {
+    return []
+  }
+
+  return result
+}
+
+function buildEntityAliases(symbol, meta, options = {}) {
+  return Array.from(
+    new Set(
+      [
+        ...(Array.isArray(options.aliases) ? options.aliases : []),
+        options.companyName,
+        meta?.companyName,
+        options.includeSymbolAlias === false ? null : symbol,
+      ]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function isTrustedSource(source) {
+  const normalized = String(source || '').trim().toLowerCase()
+  return TRUSTED_SOURCE_FRAGMENTS.some((fragment) => normalized.includes(fragment))
+}
+
+function hasCatalyst(text) {
+  const lower = String(text || '').toLowerCase()
+  return CATALYST_KEYWORDS.some((keyword) => lower.includes(keyword))
+}
+
+function isGenericBuzzText(text) {
+  const lower = String(text || '').toLowerCase()
+  return GENERIC_BUZZ_PATTERNS.some((pattern) => lower.includes(pattern))
+}
+
+function isEntityVerifiedItem(item, aliases, options = {}) {
+  const title = cleanSnippetText(item?.headline || '')
+  const summary = cleanSnippetText(item?.summary || '')
+  const combined = `${title} ${summary}`.trim()
+
+  if (!combined) return false
+  if (isGenericBuzzText(title) || isGenericBuzzText(combined)) return false
+
+  const hasTitleMatch = aliases.some((alias) => matchesEntity(title, alias))
+  const hasAnyMatch = hasTitleMatch || aliases.some((alias) => matchesEntity(summary, alias))
+
+  if (!hasAnyMatch) return false
+  if (options.requireHeadlineAlias && !hasTitleMatch) return false
+
+  return true
+}
+
 function normalizeEntityForMatch(value) {
   return String(value || '')
     .toLowerCase()
@@ -341,5 +481,14 @@ function decodeEntities(s) {
 }
 
 function sanitizeSnippet(s) {
-  return s ? s.replace(/<[^>]+>/g, '') : s;
+  return cleanSnippetText(s)
+}
+
+function cleanSnippetText(s) {
+  if (!s) return ''
+  return decodeEntities(String(s))
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 }

@@ -92,44 +92,47 @@ export async function fetchIndicesSnapshot() {
 }
 
 
-/* ============================
-   TOP GAINERS / LOSERS (NIFTY 500)
-============================ */
-export async function fetchTopMovers() {
-  const res = await fetchNSE('/equity-stockIndices?index=NIFTY%20500')
-  const rows = res?.data || []
+function normalizeMover(row) {
+  const symbol = row?.symbol
+  const price = Number(row?.ltp ?? row?.lastPrice)
+  const changePct = Number(row?.perChange ?? row?.net_price ?? row?.pChange)
 
-  const stocks = rows
-    .map(s => {
-      const last = Number(s.lastPrice)
-      const prev = Number(s.previousClose)
-
-      if (!Number.isFinite(last) || !Number.isFinite(prev) || prev <= 0) {
-        return null
-      }
-
-      const changePct = ((last - prev) / prev) * 100
-
-      return {
-        symbol: s.symbol,
-        price: last,
-        changePct
-      }
-    })
-    .filter(Boolean)
-
-  if (!stocks.length) {
-    return { gainers: [], losers: [] }
+  if (!symbol || !Number.isFinite(price) || !Number.isFinite(changePct)) {
+    return null
   }
 
-  const sorted = [...stocks].sort(
-    (a, b) => b.changePct - a.changePct
-  )
-
   return {
-    gainers: sorted.slice(0, 5),
-    losers: sorted.slice(-5).reverse()
+    symbol,
+    price,
+    changePct
   }
 }
 
+/* ============================
+   TOP GAINERS / LOSERS
+   Uses NSE's stable live movers feed.
+============================ */
+export async function fetchTopMovers() {
+  try {
+    const [gainersRes, losersRes] = await Promise.all([
+      fetchNSE('/live-analysis-variations?index=gainers'),
+      fetchNSE('/live-analysis-variations?index=loosers')
+    ])
+
+    const gainers = (gainersRes?.allSec?.data || [])
+      .map(normalizeMover)
+      .filter(Boolean)
+      .slice(0, 5)
+
+    const losers = (losersRes?.allSec?.data || [])
+      .map(normalizeMover)
+      .filter(Boolean)
+      .slice(0, 5)
+
+    return { gainers, losers }
+  } catch (error) {
+    console.error('Error fetching top movers:', error)
+    return { gainers: [], losers: [] }
+  }
+}
 

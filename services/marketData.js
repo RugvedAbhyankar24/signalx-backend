@@ -10,6 +10,38 @@ const IST_DATE_FORMATTER = new Intl.DateTimeFormat('en-CA', {
   month: '2-digit',
   day: '2-digit',
 });
+
+const IST_WEEKDAY_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Kolkata',
+  weekday: 'short',
+});
+
+/**
+ * Returns true only when NSE's live API is expected to be reachable:
+ * a weekday that is not in NSE_HOLIDAYS and is within a loose window
+ * around market hours (08:00–16:30 IST). Outside this window the API
+ * either returns 403 or stale data, so we skip straight to Yahoo.
+ */
+function isNSELikelyAvailable() {
+  const now = new Date();
+  const weekday = IST_WEEKDAY_FORMATTER.format(now);
+  if (weekday === 'Sat' || weekday === 'Sun') return false;
+
+  const istDate = IST_DATE_FORMATTER.format(now);
+  const NSE_HOLIDAYS = new Set(
+    String(process.env.NSE_HOLIDAYS || '').split(',').map(s => s.trim()).filter(Boolean)
+  );
+  if (NSE_HOLIDAYS.has(istDate)) return false;
+
+  // Accept a wider window than the trading session so pre-open and
+  // post-close data calls also use NSE (08:00–16:30 IST)
+  const hourMin = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).format(now);
+  const [h, m] = hourMin.split(':').map(Number);
+  const mins = h * 60 + m;
+  return mins >= 8 * 60 && mins <= 16 * 60 + 30;
+}
 /* =====================
    YAHOO CHART FETCH
 ====================== */
@@ -51,14 +83,81 @@ function normalizeIndianSymbol(symbol) {
 /* =====================
    GAP + PRICE (NSE)
 ====================== */
+/**
+ * Yahoo Finance fallback for full gap/price data.
+ * Uses the v8 chart API (more reliable than v7/quote which requires crumbs).
+ * Works on weekends — returns last trading session's price as currentPrice.
+ */
+async function fetchGapDataFromYahoo(symbol) {
+  const norm = normalizeIndianSymbol(symbol);  // e.g. HDFCBANK.NS
+
+  // Fetch 5-day daily chart — gives us meta fields and recent OHLCV
+  const result = await yahooChart(norm, { range: '5d', interval: '1d' });
+  const meta = result?.meta;
+  if (!meta) throw new Error('Yahoo Finance chart returned no meta');
+
+  // Prefer the live regularMarketPrice from meta; fall back to last daily close
+  let currentPrice = meta.regularMarketPrice ?? null;
+  let prevClose    = meta.regularMarketPreviousClose ?? meta.previousClose ?? null;
+  let open         = meta.regularMarketOpen ?? null;
+  let marketCap    = meta.marketCap ?? null;
+
+  // If meta fields are missing (can happen outside trading hours for some feeds),
+  // derive from the daily OHLCV candles in the chart response
+  if (currentPrice == null || prevClose == null) {
+    const q  = result?.indicators?.quote?.[0];
+    const ts = result?.timestamp ?? [];
+    const closes = (q?.close  ?? []).map((v, i) => ({ v, t: ts[i] })).filter(x => x.v != null);
+    const opens  = (q?.open   ?? []).map((v, i) => ({ v, t: ts[i] })).filter(x => x.v != null);
+
+    if (closes.length >= 2) {
+      currentPrice ??= closes[closes.length - 1].v;
+      prevClose    ??= closes[closes.length - 2].v;
+      open         ??= opens[opens.length - 1]?.v ?? null;
+    } else if (closes.length === 1) {
+      currentPrice ??= closes[0].v;
+    }
+  }
+
+  if (currentPrice == null || prevClose == null) {
+    throw new Error('Yahoo Finance missing core price fields');
+  }
+
+  const gapOpenPct = (open != null && prevClose !== 0)
+    ? ((open - prevClose) / prevClose) * 100
+    : null;
+  const gapNowPct = prevClose !== 0
+    ? ((currentPrice - prevClose) / prevClose) * 100
+    : null;
+
+  return {
+    open,
+    prevClose,
+    currentPrice,
+    gapOpenPct,
+    gapNowPct,
+    marketCap,
+    marketCapSource: marketCap ? 'Yahoo' : null,
+    priceSource: 'Yahoo',
+    companyName: meta.longName || meta.shortName || baseIndianSymbol(symbol),
+  };
+}
+
 export async function fetchGapData(symbol) {
   const base = baseIndianSymbol(symbol);
+  let nseError = null;
+
+  // ── Primary: NSE (only on trading days within market window) ──
+  if (!isNSELikelyAvailable()) {
+    console.debug(`[fetchGapData] NSE skipped for ${base} (market closed) — using Yahoo Finance`);
+    return fetchGapDataFromYahoo(symbol);
+  }
 
   try {
     const q = await fetchNSEQuote(base);
 
-    const prevClose = q?.previousClose ?? null;
-    const open = q?.open ?? null;
+    const prevClose    = q?.previousClose ?? null;
+    const open         = q?.open ?? null;
     const currentPrice = q?.lastPrice ?? null;
 
     if (prevClose == null || open == null) {
@@ -66,12 +165,11 @@ export async function fetchGapData(symbol) {
     }
 
     const gapOpenPct = ((open - prevClose) / prevClose) * 100;
-    const gapNowPct =
-      currentPrice != null
-        ? ((currentPrice - prevClose) / prevClose) * 100
-        : null;
+    const gapNowPct  = currentPrice != null
+      ? ((currentPrice - prevClose) / prevClose) * 100
+      : null;
 
-    let marketCap = q?.marketCap ?? null;
+    let marketCap       = q?.marketCap ?? null;
     let marketCapSource = marketCap ? 'NSE' : null;
 
     if (!marketCap && currentPrice && q?.issuedSize) {
@@ -82,31 +180,32 @@ export async function fetchGapData(symbol) {
       }
     }
 
+    // Market-cap fallbacks (non-blocking — don't let these fail the whole call)
     if (!marketCap) {
-      marketCap = await fetchScreenerMarketCap(base);
-      marketCapSource = marketCap ? 'Screener' : null;
+      try {
+        marketCap = await fetchScreenerMarketCap(base);
+        marketCapSource = marketCap ? 'Screener' : null;
+      } catch { /* ignore */ }
+    }
+    if (!marketCap) {
+      try {
+        const yResult = await yahooChart(normalizeIndianSymbol(symbol), { range: '1d', interval: '1d' });
+        marketCap = yResult?.meta?.marketCap ?? null;
+        marketCapSource = marketCap ? 'Yahoo' : null;
+      } catch { /* ignore */ }
     }
 
-    if (!marketCap) {
-      const norm = normalizeIndianSymbol(symbol);
-      const yq = await fetchQuote(norm);
-      marketCap = yq?.marketCap ?? null;
-      marketCapSource = marketCap ? 'Yahoo' : null;
-    }
-
-    return {
-      open,
-      prevClose,
-      currentPrice,
-      gapOpenPct,
-      gapNowPct,
-      marketCap,
-      marketCapSource,
-      priceSource: 'NSE',
-      companyName: q?.companyName || base,
-    };
+    return { open, prevClose, currentPrice, gapOpenPct, gapNowPct, marketCap, marketCapSource, priceSource: 'NSE', companyName: q?.companyName || base };
   } catch (err) {
-    throw new Error(`NSE quote failed: ${err.message || err}`);
+    nseError = err;
+    console.warn(`[fetchGapData] NSE failed for ${base} (${err.message}) — trying Yahoo Finance`);
+  }
+
+  // ── Fallback: Yahoo Finance ───────────────────────────────────
+  try {
+    return await fetchGapDataFromYahoo(symbol);
+  } catch (yhErr) {
+    throw new Error(`Price unavailable — NSE: ${nseError.message}; Yahoo: ${yhErr.message}`);
   }
 }
 
@@ -167,39 +266,33 @@ export async function fetchIndexOHLC(indexName) {
   // NSE INDICES
   // -----------------------
   const nseMap = {
-    NIFTY50: 'NIFTY%2050',
-    NIFTY: 'NIFTY%2050',
-    BANKNIFTY: 'NIFTY%20BANK',
-    NIFTYBANK: 'NIFTY%20BANK'
+    NIFTY50: 'NIFTY 50',
+    NIFTY: 'NIFTY 50',
+    BANKNIFTY: 'NIFTY BANK',
+    NIFTYBANK: 'NIFTY BANK'
   }
 
   if (nseMap[name]) {
     try {
-      const url = `${NSE_API}/equity-stockIndices?index=${nseMap[name]}`
-      let res = await fetch(url, { headers: await getNSEHeaders() })
-
-      if (res.status === 403) {
-        // 🔄 Force cookie refresh ONCE
-        res = await fetch(url, {
-          headers: await getNSEHeaders(true)
-        })
-      }
-
-      if (!res.ok) {
-        throw new Error(`NSE index fetch failed (${res.status})`)
-      }
-
-      const json = await res.json()
-      const d = json?.data?.[0]
+      const json = await fetchNSE('/allIndices')
+      const rows = Array.isArray(json?.data) ? json.data : []
+      const d = rows.find((row) => String(row?.index || '').toUpperCase() === nseMap[name])
       if (!d) throw new Error(`No NSE index data for ${indexName}`)
 
+      const open = Number(d.open)
+      const high = Number(d.high ?? d.dayHigh)
+      const low = Number(d.low ?? d.dayLow)
+      const prevClose = Number(d.previousClose)
+      const last = Number(d.last)
+      const changePct = Number(d.percentChange ?? d.pChange)
+
       return {
-        open: d.open,
-        high: d.dayHigh,
-        low: d.dayLow,
-        prevClose: d.previousClose,
-        last: d.lastPrice,
-        changePct: d.pChange,
+        open: Number.isFinite(open) ? open : null,
+        high: Number.isFinite(high) ? high : null,
+        low: Number.isFinite(low) ? low : null,
+        prevClose: Number.isFinite(prevClose) ? prevClose : null,
+        last: Number.isFinite(last) ? last : null,
+        changePct: Number.isFinite(changePct) ? changePct : null,
         source: 'NSE'
       }
     } catch (err) {
@@ -336,6 +429,9 @@ let nseCookie = null;
 let nseCookieTime = 0;
 let nseLock = Promise.resolve(); // 🔒 Mutex lock for NSE calls
 
+// Browser-like UA used across all NSE requests
+const NSE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
 async function withNSELock(fn) {
   const release = nseLock;
   let unlock;
@@ -353,59 +449,123 @@ function baseIndianSymbol(symbol) {
   return String(symbol).trim().toUpperCase().replace(/\.(NS|BO)$/i, '');
 }
 
+/**
+ * Establish an NSE session by visiting the home page and then the
+ * live-equity-market data page. NSE/Cloudflare expects at least two
+ * page visits before accepting API calls; visiting only the home page
+ * often results in 404 on the first API request.
+ */
+async function refreshNSESession() {
+  const now = Date.now()
+  const htmlHeaders = {
+    'User-Agent': NSE_UA,
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-IN,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'sec-fetch-dest': 'document',
+    'sec-fetch-mode': 'navigate',
+    'sec-fetch-site': 'none',
+    'sec-fetch-user': '?1',
+  }
+
+  // Step 1 — home page (gets the initial nsit / nseappid cookies)
+  const homeRes = await fetch(NSE_HOME, { headers: htmlHeaders })
+  const rawHome = homeRes.headers.raw ? homeRes.headers.raw() : {}
+  const homeCookies = rawHome['set-cookie'] || []
+
+  // Step 2 — equity market page (deepens the session, required by NSE)
+  const warmupRes = await fetch(`${NSE_HOME}/market-data/live-equity-market`, {
+    headers: {
+      ...htmlHeaders,
+      Referer: NSE_HOME + '/',
+      'sec-fetch-site': 'same-origin',
+      'sec-fetch-mode': 'navigate',
+      Cookie: homeCookies.map(c => c.split(';')[0]).join('; '),
+    }
+  })
+  const rawWarmup = warmupRes.headers.raw ? warmupRes.headers.raw() : {}
+  const warmupCookies = rawWarmup['set-cookie'] || []
+
+  // Merge cookies: later Set-Cookie headers override earlier ones by name
+  const cookieMap = new Map()
+  for (const c of [...homeCookies, ...warmupCookies]) {
+    const pair = c.split(';')[0].trim()
+    const eqIdx = pair.indexOf('=')
+    if (eqIdx > 0) cookieMap.set(pair.slice(0, eqIdx), pair)
+  }
+
+  if (cookieMap.size > 0) {
+    nseCookie = Array.from(cookieMap.values()).join('; ')
+    nseCookieTime = now
+  }
+}
+
 async function getNSEHeaders(forceRefresh = false) {
   const now = Date.now()
-  const needNew = forceRefresh || !nseCookie || now - nseCookieTime > 5 * 60 * 1000
+  const stale = !nseCookie || now - nseCookieTime > 5 * 60 * 1000
 
-  if (needNew) {
-    const res = await fetch(NSE_HOME, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        Accept: 'text/html',
-        'Accept-Language': 'en-IN,en;q=0.9',
-        Connection: 'keep-alive'
-      }
-    })
-
-    const raw = res.headers.raw?.()
-    const cookies = raw?.['set-cookie']
-
-    if (cookies?.length) {
-      nseCookie = cookies.map(c => c.split(';')[0]).join('; ')
-      nseCookieTime = now
+  if (forceRefresh || stale) {
+    try {
+      await refreshNSESession()
+    } catch {
+      // Non-fatal: proceed with whatever cookies we have (or none)
     }
   }
 
   return {
-    'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    Accept: 'application/json',
+    'User-Agent': NSE_UA,
+    Accept: 'application/json, text/plain, */*',
     'Accept-Language': 'en-IN,en;q=0.9',
-    Referer: NSE_HOME + '/',
+    'Accept-Encoding': 'gzip, deflate, br',
+    Referer: `${NSE_HOME}/`,
     'X-Requested-With': 'XMLHttpRequest',
-    'sec-fetch-site': 'same-origin',
+    'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'sec-fetch-dest': 'empty',
     'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-origin',
     Connection: 'keep-alive',
-    Cookie: nseCookie
+    Cookie: nseCookie || '',
   }
 }
 
-export async function fetchNSE(path, retries = 2) {
+export async function fetchNSE(path, retries = 3) {
   return withNSELock(async () => {
+    let lastError
     for (let i = 0; i < retries; i++) {
       try {
-        const headers = await getNSEHeaders();
-        const res = await fetch(`${NSE_API}${path}`, { headers });
-        if (!res.ok) throw new Error(`NSE request failed (${res.status})`);
-        return res.json();
-      } catch (error) {
-        if (i === retries - 1) throw error;
-        nseCookie = null;
-        nseCookieTime = 0;
-        await new Promise(r => setTimeout(r, 800));
+        // Force-refresh session on every retry after the first attempt
+        const headers = await getNSEHeaders(i > 0)
+        const res = await fetch(`${NSE_API}${path}`, { headers })
+
+        if (res.ok) return res.json()
+
+        // 401/403/404 all indicate a session/bot-protection issue — reset and retry
+        const status = res.status
+        lastError = new Error(`NSE request failed (${status})`)
+        nseCookie = null
+        nseCookieTime = 0
+
+        if (i < retries - 1) {
+          await new Promise(r => setTimeout(r, 1000 * (i + 1))) // 1s, 2s back-off
+        }
+      } catch (err) {
+        lastError = err
+        nseCookie = null
+        nseCookieTime = 0
+        if (i < retries - 1) {
+          await new Promise(r => setTimeout(r, 1000 * (i + 1)))
+        }
       }
     }
+    throw lastError
   });
 }
 
@@ -422,6 +582,65 @@ async function fetchNSEQuote(symbolBase) {
     issuedSize: s.issuedSize,
     companyName: info.companyName || symbolBase,
   };
+}
+
+/**
+ * Lightweight price-only quote — skips the slow market-cap fallback chain.
+ * Tries NSE first; falls back to Yahoo Finance if NSE is unavailable.
+ * Returns { currentPrice, previousClose, dayChangePct } or throws.
+ */
+export async function fetchQuoteBasic(symbol) {
+  const base = baseIndianSymbol(symbol);
+  const norm = normalizeIndianSymbol(symbol);
+
+  // Skip NSE outside trading window to avoid guaranteed 403s
+  if (!isNSELikelyAvailable()) {
+    try {
+      const result = await yahooChart(norm, { range: '2d', interval: '1d' });
+      const meta = result?.meta;
+      if (!meta) return { currentPrice: null, previousClose: null, dayChangePct: null };
+      const currentPrice  = meta.regularMarketPrice ?? null;
+      const previousClose = meta.regularMarketPreviousClose ?? meta.previousClose ?? null;
+      const dayChangePct  =
+        meta.regularMarketChangePercent ??
+        (currentPrice != null && previousClose != null && previousClose !== 0
+          ? ((currentPrice - previousClose) / previousClose) * 100
+          : null);
+      return { currentPrice, previousClose, dayChangePct };
+    } catch {
+      return { currentPrice: null, previousClose: null, dayChangePct: null };
+    }
+  }
+
+  // Primary: NSE (trading days only)
+  try {
+    const q = await fetchNSEQuote(base);
+    const currentPrice  = q?.lastPrice ?? null;
+    const previousClose = q?.previousClose ?? null;
+    const dayChangePct  =
+      currentPrice != null && previousClose != null && previousClose !== 0
+        ? ((currentPrice - previousClose) / previousClose) * 100
+        : null;
+    return { currentPrice, previousClose, dayChangePct };
+  } catch {
+    // Fallback: Yahoo Finance chart API (v8 — more reliable than v7/quote)
+    try {
+      const norm = normalizeIndianSymbol(symbol);
+      const result = await yahooChart(norm, { range: '2d', interval: '1d' });
+      const meta = result?.meta;
+      if (!meta) return { currentPrice: null, previousClose: null, dayChangePct: null };
+      const currentPrice  = meta.regularMarketPrice ?? null;
+      const previousClose = meta.regularMarketPreviousClose ?? meta.previousClose ?? null;
+      const dayChangePct  =
+        meta.regularMarketChangePercent ??
+        (currentPrice != null && previousClose != null && previousClose !== 0
+          ? ((currentPrice - previousClose) / previousClose) * 100
+          : null);
+      return { currentPrice, previousClose, dayChangePct };
+    } catch {
+      return { currentPrice: null, previousClose: null, dayChangePct: null };
+    }
+  }
 }
 
 /* =====================
@@ -445,6 +664,9 @@ async function fetchScreenerMarketCap(symbolBase) {
 export async function resolveNSESymbol(query) {
   const q = query.trim().toUpperCase()
 
+  // Skip NSE entirely outside trading window — avoids guaranteed 403s
+  if (!isNSELikelyAvailable()) return q
+
   // If already valid NSE symbol, try directly
   try {
     await fetchNSEQuote(q)
@@ -452,16 +674,19 @@ export async function resolveNSESymbol(query) {
   } catch (_) {}
 
   // 🔍 NSE search API (official)
-  const data = await fetchNSE(
-    `/search/autocomplete?q=${encodeURIComponent(q)}`
-  )
+  try {
+    const data = await fetchNSE(
+      `/search/autocomplete?q=${encodeURIComponent(q)}`
+    )
 
-  const best = data?.symbols?.[0]
-  if (!best?.symbol) {
-    throw new Error(`No NSE symbol found for "${query}"`)
+    const best = data?.symbols?.[0]
+    if (best?.symbol) return best.symbol
+  } catch (_) {
+    // NSE may be unavailable (e.g. rate-limited) — fall through to symbol passthrough
   }
 
-  return best.symbol
+  // NSE couldn't confirm — return the raw symbol so fetchGapData falls back to Yahoo.
+  return q
 }
 
 /* =====================
