@@ -1,9 +1,63 @@
 import express from 'express'
 import { createRateLimiter } from '../middleware/rateLimit.js'
-import { fetchGapData, fetchIndexOHLC, resolveNSESymbol } from '../services/marketData.js'
+import { fetchGapData, fetchIndexOHLC, fetchNSE, resolveNSESymbol } from '../services/marketData.js'
 import { getIntradayLeverageForSymbols } from '../services/leverageService.js'
 
 const router = express.Router()
+
+// ── Holiday cache ─────────────────────────────────────────────────────────────
+let _holidayCache = null      // { holidays: ['YYYY-MM-DD', ...], fetchedAt: number }
+const HOLIDAY_CACHE_TTL_MS = 12 * 60 * 60 * 1000  // 12 hours
+
+/**
+ * Parse NSE tradingDate string ("26-Jan-2026") → "2026-01-26".
+ * Returns null if the string can't be parsed.
+ */
+function parseTradingDate(str) {
+  if (!str || typeof str !== 'string') return null
+  const MON = { Jan:0, Feb:1, Mar:2, Apr:3, May:4, Jun:5,
+                Jul:6, Aug:7, Sep:8, Oct:9, Nov:10, Dec:11 }
+  const parts = str.trim().split('-')
+  if (parts.length !== 3) return null
+  const [dd, mon, yyyy] = parts
+  const m = MON[mon]
+  if (m === undefined) return null
+  const d = new Date(Date.UTC(parseInt(yyyy, 10), m, parseInt(dd, 10)))
+  if (isNaN(d)) return null
+  return d.toISOString().slice(0, 10)   // "YYYY-MM-DD"
+}
+
+router.get('/holidays', async (req, res) => {
+  const now = Date.now()
+
+  // Serve from cache if still fresh
+  if (_holidayCache && now - _holidayCache.fetchedAt < HOLIDAY_CACHE_TTL_MS) {
+    return res.json(_holidayCache)
+  }
+
+  try {
+    const raw = await fetchNSE('/holiday-master?type=trading')
+
+    // NSE response shape: { CM: [...], FO: [...], CD: [...], ... }
+    // CM = Capital Market segment — the one that governs equity trading
+    const cmRows = Array.isArray(raw?.CM) ? raw.CM : []
+
+    const holidays = cmRows
+      .map(row => parseTradingDate(row?.tradingDate))
+      .filter(Boolean)
+      .sort()
+
+    _holidayCache = { holidays, fetchedAt: now }
+    res.json(_holidayCache)
+  } catch (err) {
+    console.error('[market/holidays] NSE fetch failed:', err.message)
+    // Return whatever we have cached (even if stale) so the frontend isn't empty-handed
+    if (_holidayCache) return res.json({ ..._holidayCache, stale: true })
+    // Absolute fallback — empty list (weekend guard still works)
+    res.json({ holidays: [], fetchedAt: now, error: 'NSE unavailable' })
+  }
+})
+
 const resolvedSymbolCache = new Map()
 const RESOLVED_SYMBOL_TTL_MS = 6 * 60 * 60 * 1000
 const quotesLimiter = createRateLimiter({
