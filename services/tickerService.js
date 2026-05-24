@@ -116,7 +116,7 @@ export async function fetchTopMovers() {
   try {
     const [gainersRes, losersRes] = await Promise.all([
       fetchNSE('/live-analysis-variations?index=gainers'),
-      fetchNSE('/live-analysis-variations?index=loosers')
+      fetchNSE('/live-analysis-variations?index=losers')
     ])
 
     const gainers = (gainersRes?.allSec?.data || [])
