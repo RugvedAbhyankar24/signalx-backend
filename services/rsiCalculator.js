@@ -16,7 +16,11 @@ export function computeRSI(closes, period = 14) {
     avgGain = (avgGain * (period - 1) + gains[i]) / period;
     avgLoss = (avgLoss * (period - 1) + losses[i]) / period;
   }
-  const rs = avgLoss === 0 ? 100 : avgGain / (avgLoss || 1e-12);
+  // When there are no losses RSI is exactly 100 (not ~99.0 via RS=100 shortcut)
+  if (avgLoss === 0) return 100;
+  // When there are no gains RSI is exactly 0
+  if (avgGain === 0) return 0;
+  const rs = avgGain / avgLoss;
   const rsi = 100 - 100 / (1 + rs);
   return Math.round(rsi * 10) / 10;
 }

@@ -2,6 +2,8 @@ import express from 'express'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import { fetchGapData, fetchIndexOHLC, fetchNSE, resolveNSESymbol } from '../services/marketData.js'
 import { getIntradayLeverageForSymbols } from '../services/leverageService.js'
+import { fetchStructuredEventCalendar } from '../services/eventCalendarService.js'
+import { fetchInstitutionalFlowSnapshot, fetchMarketActivityProfile } from '../services/marketActivityService.js'
 
 const router = express.Router()
 
@@ -91,22 +93,60 @@ async function resolveCachedSymbol(symbol) {
 }
 
 router.get('/indices', async (req, res) => {
-  try {
-    const [nifty, bankNifty, sensex] = await Promise.all([
-      fetchIndexOHLC('NIFTY 50'),
-      fetchIndexOHLC('NIFTY BANK'),
-      fetchIndexOHLC('SENSEX')
-    ])
+  const [niftyRes, bankNiftyRes, sensexRes] = await Promise.allSettled([
+    fetchIndexOHLC('NIFTY 50'),
+    fetchIndexOHLC('NIFTY BANK'),
+    fetchIndexOHLC('SENSEX')
+  ])
 
+  const unwrap = (r, label) => {
+    if (r.status === 'fulfilled') return r.value
+    console.warn(`[market/indices] ${label} failed:`, r.reason?.message)
+    return null
+  }
+
+  res.json({
+    nifty50:   unwrap(niftyRes,    'NIFTY 50'),
+    bankNifty: unwrap(bankNiftyRes,'NIFTY BANK'),
+    sensex:    unwrap(sensexRes,   'SENSEX'),
+    timestamp: new Date()
+  })
+})
+
+router.get('/events', async (req, res) => {
+  const symbol = String(req.query?.symbol || '').trim().toUpperCase()
+
+  try {
+    const calendar = await fetchStructuredEventCalendar(symbol || null)
+    res.json(calendar)
+  } catch (error) {
+    console.error('market event calendar error', error)
+    res.status(500).json({ error: 'Failed to fetch event calendar' })
+  }
+})
+
+router.get('/activity', async (req, res) => {
+  const symbol = String(req.query?.symbol || '').trim().toUpperCase()
+  const biasDirection = String(req.query?.biasDirection || 'long').trim().toLowerCase() === 'short' ? 'short' : 'long'
+
+  try {
+    if (!symbol) {
+      const flow = await fetchInstitutionalFlowSnapshot()
+      return res.json({
+        symbol: null,
+        flow,
+        updatedAt: new Date().toISOString(),
+      })
+    }
+
+    const activity = await fetchMarketActivityProfile(symbol, { biasDirection })
     res.json({
-      nifty50: nifty,
-      bankNifty,
-      sensex,
-      timestamp: new Date()
+      ...activity,
+      updatedAt: new Date().toISOString(),
     })
-  } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Market data unavailable' })
+  } catch (error) {
+    console.error('market activity error', error)
+    res.status(500).json({ error: 'Failed to fetch market activity' })
   }
 })
 

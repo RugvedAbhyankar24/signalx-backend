@@ -45,15 +45,58 @@ function isNSELikelyAvailable() {
 /* =====================
    YAHOO CHART FETCH
 ====================== */
+// Keep headers minimal — Origin/Referer trigger Yahoo's browser auth/CSRF
+// checks on the v8 chart API and cause all requests to fail.  A plain
+// User-Agent is enough to avoid the bot-rejection 403 on index tickers.
+const YAHOO_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+};
+
 async function yahooChart(symbol, params) {
   const usp = new URLSearchParams(params);
   const url = `${YF_BASE}/${encodeURIComponent(symbol)}?${usp.toString()}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Yahoo fetch failed for ${symbol}`);
-  const data = await res.json();
-  const result = data?.chart?.result?.[0];
-  if (!result) throw new Error(`No chart data for ${symbol}`);
-  return result;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const res = await fetch(url, { signal: controller.signal, headers: YAHOO_HEADERS });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error(`Yahoo fetch failed for ${symbol} (HTTP ${res.status})`);
+    const data = await res.json();
+    const result = data?.chart?.result?.[0];
+    if (!result) throw new Error(`No chart data for ${symbol}`);
+    return result;
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === 'AbortError') throw new Error(`Yahoo fetch timeout for ${symbol}`);
+    throw err;
+  }
+}
+
+// Lightweight quote fetch — tries v8 chart with range=1d then falls back to
+// the v7 quote endpoint.  Returns { last, changePct, prevClose } or null.
+async function yahooQuoteFallback(symbol) {
+  try {
+    // Try v7 quote API — different endpoint, sometimes succeeds when chart doesn't
+    const url = `${YF_QUOTE}?symbols=${encodeURIComponent(symbol)}&fields=regularMarketPrice,regularMarketChangePercent,regularMarketPreviousClose`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const res = await fetch(url, { signal: controller.signal, headers: YAHOO_HEADERS });
+    clearTimeout(timeout);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const q = data?.quoteResponse?.result?.[0];
+    if (!q) return null;
+    return {
+      last: q.regularMarketPrice ?? null,
+      changePct: q.regularMarketChangePercent ?? null,
+      prevClose: q.regularMarketPreviousClose ?? null,
+      source: 'YAHOO-QUOTE'
+    };
+  } catch {
+    return null;
+  }
 }
 
 /* =====================
@@ -88,7 +131,7 @@ function normalizeIndianSymbol(symbol) {
  * Uses the v8 chart API (more reliable than v7/quote which requires crumbs).
  * Works on weekends — returns last trading session's price as currentPrice.
  */
-async function fetchGapDataFromYahoo(symbol) {
+export async function fetchGapDataFromYahoo(symbol) {
   const norm = normalizeIndianSymbol(symbol);  // e.g. HDFCBANK.NS
 
   // Fetch 5-day daily chart — gives us meta fields and recent OHLCV
@@ -257,6 +300,11 @@ export async function fetchOHLCV(symbol, minPeriods = 60, options = {}) {
 
   return candles;
 }
+// Sensex-specific short-lived cache — prevents multiple callers (ticker +
+// market/indices) from hitting Yahoo simultaneously and triggering 429s.
+let _sensexCache = null; // { data, fetchedAt }
+const SENSEX_CACHE_TTL_MS = 45_000; // 45 s — fresh enough for a live dashboard
+
 export async function fetchIndexOHLC(indexName) {
   const name = indexName
     .toUpperCase()
@@ -274,7 +322,7 @@ export async function fetchIndexOHLC(indexName) {
 
   if (nseMap[name]) {
     try {
-      const json = await fetchNSE('/allIndices')
+      const json = await fetchAllIndicesCached()
       const rows = Array.isArray(json?.data) ? json.data : []
       const d = rows.find((row) => String(row?.index || '').toUpperCase() === nseMap[name])
       if (!d) throw new Error(`No NSE index data for ${indexName}`)
@@ -325,84 +373,68 @@ export async function fetchIndexOHLC(indexName) {
   }
 
   // -----------------------
-  // BSE: SENSEX (Simplified API Implementation)
+  // BSE: SENSEX
+  // Chain: cache → Yahoo chart API → Yahoo quote API → null (never throws)
   // -----------------------
-if (name === 'SENSEX') {
-  try {
-    // Try BSE web scraping first - most reliable
-    const bseWebResponse = await fetch('https://www.bseindia.com/sensex/', {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    })
-    
-    if (bseWebResponse.ok) {
-      const html = await bseWebResponse.text()
-      // Extract Sensex value from HTML using regex patterns
-      const sensexMatch = html.match(/class="sensexval"[^>]*>([\d,]+\.?\d*)/i) || 
-                          html.match(/id="sensexvalue"[^>]*>([\d,]+\.?\d*)/i) ||
-                          html.match(/SENSEX[^>]*>([\d,]+\.?\d*)/i)
-      
-      const changeMatch = html.match(/class="sensexchange"[^>]*>([+-]?[\d,]+\.?\d*)/i) ||
-                          html.match(/id="sensexchange"[^>]*>([+-]?[\d,]+\.?\d*)/i)
-      
-      const percentMatch = html.match(/class="sensexpercent"[^>]*>([+-]?[\d,]+\.?\d*)/i) ||
-                           html.match(/id="sensexpercent"[^>]*>([+-]?[\d,]+\.?\d*)/i)
-      
-      if (sensexMatch) {
-        const sensexValue = parseFloat(sensexMatch[1].replace(/,/g, ''))
-        const changeValue = changeMatch ? parseFloat(changeMatch[1].replace(/,/g, '')) : null
-        const changePercent = percentMatch ? parseFloat(percentMatch[1].replace(/,/g, '')) : null
-        
-        return {
-          open: null,
-          high: null,
-          low: null,
-          prevClose: changeValue && sensexValue ? sensexValue - changeValue : null,
-          last: sensexValue,
-          changePct: changePercent,
-          source: 'BSE Web Scraped'
-        }
-      }
+  if (name === 'SENSEX') {
+    // Serve from cache if still fresh (prevents 429 from concurrent callers)
+    if (_sensexCache && Date.now() - _sensexCache.fetchedAt < SENSEX_CACHE_TTL_MS) {
+      return _sensexCache.data;
     }
-  } catch (scrapeError) {
-    console.log('Web scraping failed, trying Yahoo:', scrapeError.message)
+
+    // 1️⃣  Yahoo chart API (v8) with browser headers
+    try {
+      const chart = await yahooChart('^BSESN', { range: '1d', interval: '5m' });
+      const meta  = chart?.meta;
+      const q     = chart?.indicators?.quote?.[0];
+      if (meta && q) {
+        const closes   = (q.close  || []).filter(v => v != null);
+        const last     = meta.regularMarketPrice ?? closes[closes.length - 1];
+        const prevClose = meta.regularMarketPreviousClose ?? meta.previousClose ?? closes[closes.length - 2];
+        let changePct  = null;
+        if (typeof meta.regularMarketChangePercent === 'number') {
+          changePct = meta.regularMarketChangePercent;
+        } else if (prevClose && last) {
+          changePct = ((last - prevClose) / prevClose) * 100;
+        }
+        const result1 = {
+          open: meta.chartPreviousClose ?? prevClose ?? null,
+          high: meta.regularMarketDayHigh ?? null,
+          low:  meta.regularMarketDayLow  ?? null,
+          prevClose: prevClose ?? null,
+          last: last ?? null,
+          changePct: changePct != null ? Number(changePct.toFixed(2)) : null,
+          source: 'YAHOO'
+        };
+        _sensexCache = { data: result1, fetchedAt: Date.now() };
+        return result1;
+      }
+    } catch (e) {
+      console.warn('[Sensex] Yahoo chart failed, trying quote API:', e.message);
+    }
+
+    // 2️⃣  Yahoo v7 quote API (different endpoint, often works when chart fails)
+    const q2 = await yahooQuoteFallback('^BSESN');
+    if (q2 && q2.last != null) {
+      const result2 = {
+        open: q2.prevClose ?? null,
+        high: null, low: null,
+        prevClose: q2.prevClose ?? null,
+        last: q2.last,
+        changePct: q2.changePct != null ? Number(q2.changePct.toFixed(2)) : null,
+        source: q2.source
+      };
+      _sensexCache = { data: result2, fetchedAt: Date.now() };
+      return result2;
+    }
+
+    // 3️⃣  All sources failed — cache the null placeholder too so we don't
+    //      keep hammering Yahoo every second while it's rate-limiting us.
+    console.warn('[Sensex] All data sources failed — returning null placeholder');
+    const nullResult = { open: null, high: null, low: null, prevClose: null, last: null, changePct: null, source: 'UNAVAILABLE' };
+    _sensexCache = { data: nullResult, fetchedAt: Date.now() };
+    return nullResult;
   }
-
-  // Fallback to Yahoo Finance
-  const chart = await yahooChart('^BSESN', {
-    range: '1d',
-    interval: '5m'  // 5-minute intervals for more recent data
-  })
-
-  const meta = chart?.meta
-  const quote = chart?.indicators?.quote?.[0]
-
-  if (!meta || !quote?.close?.length) {
-    throw new Error('Yahoo Sensex data missing')
-  }
-
-  const closes = quote.close.filter(v => v != null)
-  const last = meta.regularMarketPrice ?? closes[closes.length - 1]
-  const prevClose = meta.regularMarketPreviousClose ?? meta.previousClose ?? closes[closes.length - 2]
-
-  let changePct = null
-  if (typeof meta.regularMarketChangePercent === 'number') {
-    changePct = meta.regularMarketChangePercent
-  } else if (prevClose && last) {
-    changePct = ((last - prevClose) / prevClose) * 100
-  }
-
-  return {
-    open: meta.chartPreviousClose ?? prevClose,
-    high: meta.regularMarketDayHigh,
-    low: meta.regularMarketDayLow,
-    prevClose,
-    last,
-    changePct: changePct != null ? Number(changePct.toFixed(2)) : null,
-    source: 'YAHOO'
-  }
-}
 
 
 
@@ -420,6 +452,39 @@ async function fetchQuote(symbol) {
   if (!res.ok) return null;
   const data = await res.json();
   return data?.quoteResponse?.result?.[0] || null;
+}
+
+/* =====================
+   ALLINDICES CACHE
+   Both fetchIndexOHLC (NIFTY/BANKBNIFTY) and tickerService.fetchIndicesSnapshot
+   call /allIndices independently, serialising through the NSE mutex and burning
+   the 10 s frontend timeout.  Cache the result for 30 s so repeat calls within
+   that window return immediately.
+====================== */
+let _allIndicesCache = null  // { data: <json>, fetchedAt: <ms> }
+let _allIndicesPromise = null
+const ALL_INDICES_TTL_MS = 30_000  // 30 seconds
+
+export async function fetchAllIndicesCached() {
+  const now = Date.now()
+  if (_allIndicesCache && now - _allIndicesCache.fetchedAt < ALL_INDICES_TTL_MS) {
+    return _allIndicesCache.data
+  }
+
+  if (_allIndicesPromise) {
+    return _allIndicesPromise
+  }
+
+  _allIndicesPromise = fetchNSE('/allIndices')
+    .then((data) => {
+      _allIndicesCache = { data, fetchedAt: Date.now() }
+      return data
+    })
+    .finally(() => {
+      _allIndicesPromise = null
+    })
+
+  return _allIndicesPromise
 }
 
 /* =====================
@@ -536,13 +601,55 @@ async function getNSEHeaders(forceRefresh = false) {
   }
 }
 
-export async function fetchNSE(path, retries = 3) {
+export async function fetchNSEPage(path, retries = 3) {
+  return withNSELock(async () => {
+    let lastError
+    for (let i = 0; i < retries; i++) {
+      try {
+        const headers = await getNSEHeaders(i > 0)
+        const res = await fetch(`${NSE_HOME}${path}`, {
+          headers: {
+            ...headers,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+          }
+        })
+
+        if (res.ok) return res.text()
+
+        lastError = new Error(`NSE page request failed (${res.status})`)
+        nseCookie = null
+        nseCookieTime = 0
+        if (i < retries - 1) {
+          await new Promise(r => setTimeout(r, 1000 * (i + 1)))
+        }
+      } catch (error) {
+        lastError = error
+        nseCookie = null
+        nseCookieTime = 0
+        if (i < retries - 1) {
+          await new Promise(r => setTimeout(r, 1000 * (i + 1)))
+        }
+      }
+    }
+    throw lastError
+  })
+}
+
+export async function fetchNSE(path, retries = 5) {
   return withNSELock(async () => {
     let lastError
     for (let i = 0; i < retries; i++) {
       try {
         // Force-refresh session on every retry after the first attempt
         const headers = await getNSEHeaders(i > 0)
+
+        // On first attempt give the freshly established session a moment to
+        // be recognised by NSE's Cloudflare layer before the API call goes out.
+        // On retries the back-off below already provides the breathing room.
+        if (i === 0) await new Promise(r => setTimeout(r, 1500))
+
         const res = await fetch(`${NSE_API}${path}`, { headers })
 
         if (res.ok) return res.json()
@@ -554,14 +661,14 @@ export async function fetchNSE(path, retries = 3) {
         nseCookieTime = 0
 
         if (i < retries - 1) {
-          await new Promise(r => setTimeout(r, 1000 * (i + 1))) // 1s, 2s back-off
+          await new Promise(r => setTimeout(r, 2000 * (i + 1))) // 2s, 4s, 6s, 8s back-off
         }
       } catch (err) {
         lastError = err
         nseCookie = null
         nseCookieTime = 0
         if (i < retries - 1) {
-          await new Promise(r => setTimeout(r, 1000 * (i + 1)))
+          await new Promise(r => setTimeout(r, 2000 * (i + 1)))
         }
       }
     }
@@ -689,12 +796,71 @@ export async function resolveNSESymbol(query) {
   return q
 }
 
+async function fetchNSEStockIndexRows(indexName, retries = 3) {
+  const encodedIndex = encodeURIComponent(indexName)
+  const apiPath = `/equity-stock-indices?index=${encodedIndex}`
+  const warmupPath = `/market-data/live-equity-market?symbol=${encodedIndex}`
+
+  let lastError = null
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      await fetchNSEPage(warmupPath, 2)
+      await new Promise(r => setTimeout(r, 1500))
+      const data = await fetchNSE(apiPath, 5)
+      const rows = Array.isArray(data?.data) ? data.data : []
+      if (rows.length > 0) return rows
+      lastError = new Error(`NSE stock index payload empty for ${indexName}`)
+    } catch (error) {
+      lastError = error
+      console.warn(
+        `[scan-universe] ${indexName} attempt ${attempt + 1}/${retries} failed: ${error.message}`
+      )
+    }
+
+    if (attempt < retries - 1) {
+      try {
+        await fetchNSEPage(warmupPath, 2)
+      } catch (warmupError) {
+        console.warn(`[scan-universe] warmup page failed: ${warmupError.message}`)
+      }
+      await new Promise(r => setTimeout(r, 2500 * (attempt + 1)))
+    }
+  }
+
+  throw lastError || new Error(`NSE stock index fetch failed for ${indexName}`)
+}
+
 /* =====================
    FAST SCAN (Stage 1)
 ====================== */
+// Fallback symbol list for when NSE is unavailable (market closed/holidays)
+const FALLBACK_SYMBOLS = [
+  'RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK', 'SBIN', 'BHARTIARTL',
+  'ITC', 'KOTAKBANK', 'LT', 'HINDUNILVR', 'AXISBANK', 'BAJFINANCE', 'MARUTI',
+  'ADANIENT', 'TATAMOTORS', 'TATASTEEL', 'POWERGRID', 'WIPRO', 'HCLTECH',
+  'NTPC', 'ULTRACEMCO', 'SUNPHARMA', 'TITAN', 'BAJAJFINSV', 'DMART',
+  'NESTLEIND', 'ONGC', 'JSWSTEEL', 'M&M', 'CIPLA', 'COALINDIA'
+];
+
 export async function fastMarketScan() {
-  const data = await fetchNSE('/equity-stockIndices?index=NIFTY%20500')
-  const stocks = data?.data || []
+  let stocks;
+  try {
+    // Add timeout to prevent NSE retry delays from hanging the scan
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('NSE stock index fetch timeout')), 10000)
+    );
+    stocks = await Promise.race([
+      fetchNSEStockIndexRows('NIFTY 500', 2), // Reduce retries from 4 to 2
+      timeoutPromise
+    ]);
+  } catch (err) {
+    console.warn(`[fastMarketScan] NSE fetch failed: ${err.message}`);
+    // Fallback: use cached symbol list when NSE is unavailable
+    console.log('[fastMarketScan] Using fallback symbol list');
+    // pChange must be non-zero to pass the movement >= 0.3 filter below.
+    // Use a nominal 1% so fallback symbols aren't silently dropped.
+    stocks = FALLBACK_SYMBOLS.map(symbol => ({ symbol, lastPrice: 1000, pChange: 1.0, totalTradedVolume: 5000000 }));
+  }
 
   const stage1Limit = Math.max(
     30,
@@ -832,9 +998,7 @@ export async function fastMarketScan() {
 }
 
 export async function fetchMarketMovers() {
-  const data = await fetchNSE('/equity-stockIndices?index=NIFTY%20500')
-
-  const stocks = data?.data || []
+  const stocks = await fetchNSEStockIndexRows('NIFTY 500', 4)
 
   return stocks
     .filter(s => {
@@ -864,6 +1028,7 @@ export async function fetchFundamentals(symbolBase) {
     const res = await fetch(`https://www.screener.in/company/${symbolBase}/`, {
       headers: { 'User-Agent': 'Mozilla/5.0' }
     })
+    if (!res.ok) return null
     const html = await res.text()
 
     const extract = (regex) => {

@@ -5,8 +5,8 @@ import newsRouter from './routes/news.js';
 import scanRouter from './routes/scan.js';
 import tickerRouter from './routes/ticker.js';
 import marketRoutes from './routes/market.js';
-import intradayRouter from './routes/intraday.js';
-import swingRouter from './routes/swing.js';
+import intradayRouter, { startIntradayBackgroundScan } from './routes/intraday.js';
+import swingRouter, { startSwingBackgroundScan } from './routes/swing.js';
 dotenv.config();
 
 const app = express();
@@ -81,6 +81,17 @@ app.use((err, req, res, next) => {
 
 const server = app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
+
+  // Auto-start background scans after a short delay so routes are ready
+  setTimeout(() => {
+    console.log('⚡ Auto-starting initial background scans...');
+    startIntradayBackgroundScan();
+    startSwingBackgroundScan();
+  }, 2000);
+
+  // Periodic rescans: intraday every 15 min, swing every 30 min
+  setInterval(startIntradayBackgroundScan, 15 * 60 * 1000);
+  setInterval(startSwingBackgroundScan,    30 * 60 * 1000);
 });
 
 server.on('error', (error) => {

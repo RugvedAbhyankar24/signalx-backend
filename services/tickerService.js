@@ -1,4 +1,4 @@
-import { fetchNSE, fetchIndexOHLC } from './marketData.js'
+import { fetchNSE, fetchIndexOHLC, fetchAllIndicesCached } from './marketData.js'
 
 const INDICES = [
   'NIFTY 50',
@@ -28,7 +28,7 @@ const INDICES = [
 export async function fetchIndicesSnapshot() {
   try {
     // Fetch NSE indices
-    const nseRes = await fetchNSE('/allIndices')
+    const nseRes = await fetchAllIndicesCached()
     const nseRows = nseRes?.data || []
 
     // Fetch Sensex data separately
@@ -135,4 +135,3 @@ export async function fetchTopMovers() {
     return { gainers: [], losers: [] }
   }
 }
-

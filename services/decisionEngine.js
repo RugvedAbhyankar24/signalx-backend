@@ -37,17 +37,47 @@ export function makeDecision({
   /* =====================
      2️⃣ WEAK GAP MOMENTUM
   ====================== */
-  if (
-    isWeakGap &&
-    confirmation &&
-    rsiBias === 'bullish' &&
-    candleColor === 'green'
-  ) {
+  if (isWeakGap) {
+    // Weak gap up: only tradeable when all confirmation signals align
+    if (
+      gapPct > 0 &&
+      confirmation &&
+      rsiBias === 'bullish' &&
+      candleColor === 'green'
+    ) {
+      return {
+        label: 'Tradeable',
+        sentiment: 'positive',
+        reason: 'Weak gap with strong momentum continuation',
+        icon: '✅'
+      }
+    }
+
+    // Weak gap up without confirmation — watch, don't trade
+    if (gapPct > 0) {
+      return {
+        label: 'Cautious',
+        sentiment: 'neutral',
+        reason: 'Weak gap up — confirmation lacking',
+        icon: '⚠️'
+      }
+    }
+
+    // Weak gap down — avoid unless oversold reversal attempt
+    if (isOversold && candleColor === 'green') {
+      return {
+        label: 'Cautious',
+        sentiment: 'neutral',
+        reason: 'Weak gap down but oversold — watch for reversal',
+        icon: '⚠️'
+      }
+    }
+
     return {
-      label: 'Tradeable',
-      sentiment: 'positive',
-      reason: 'Weak gap with strong momentum continuation',
-      icon: '✅'
+      label: 'Avoid',
+      sentiment: 'negative',
+      reason: 'Weak gap down — bearish bias',
+      icon: '❌'
     }
   }
 

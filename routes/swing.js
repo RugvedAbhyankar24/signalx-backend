@@ -1,16 +1,29 @@
 import express from 'express';
-import { fetchGapData, fetchOHLCV, fetchMarketMovers, fastMarketScan } from '../services/marketData.js';
+import { fetchGapData, fetchGapDataFromYahoo, fetchOHLCV, fetchMarketMovers, fastMarketScan } from '../services/marketData.js';
 import {
   detectVolumeSpike,
   calculateSwingVWAP,
   supportResistance,
-  estimateATRPercent
+  estimateATRPercent,
+  getEMAStack,
+  calculateMACD,
+  calculateBollingerBands,
+  getVolumeTrend,
+  calculateADX,
+  calculateSupertrend,
+  calculateOBV,
+  detectCandlePattern
 } from '../services/technicalIndicators.js';
 import { computeRSI } from '../services/rsiCalculator.js';
 import { evaluateSwing, calculateSwingEntryPrice } from '../services/positionEvaluator.js';
 import { resolveNSESymbol } from '../services/marketData.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
 import { applySwingLifecycle } from '../services/swingLifecycleStore.js';
+import { getEventRiskProfile } from '../services/eventRiskService.js';
+import { fetchMicrostructureSnapshot } from '../services/microstructureService.js';
+import { runSwingBacktest, runSwingThresholdSweep } from '../services/swingBacktestService.js';
+import { fetchMarketActivityProfile } from '../services/marketActivityService.js';
+import { buildProfessionalGate } from '../services/professionalDeskService.js';
 
 const router = express.Router();
 const compliance = {
@@ -46,11 +59,30 @@ async function mapWithConcurrency(items, concurrency, fn) {
   for (let i = 0; i < items.length; i += concurrency) {
     const batch = items.slice(i, i + concurrency);
     const batchResults = await Promise.all(
-      batch.map(item => fn(item).catch(err => ({ error: err.message, item })))
+      batch.map(item => {
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Symbol processing timeout')), 20000)
+        );
+        return Promise.race([
+          fn(item),
+          timeoutPromise
+        ]).catch(err => ({ error: err.message, item }));
+      })
     );
     results.push(...batchResults);
   }
   return results;
+}
+
+async function scanInBatches(items, batchSize, concurrency, fn, logLabel) {
+  const results = []
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize)
+    console.log(`${logLabel} batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(items.length / batchSize)} (${batch.length} symbols)`)
+    const batchResults = await mapWithConcurrency(batch, concurrency, fn)
+    results.push(...batchResults)
+  }
+  return results
 }
 
 function isFiniteOHLC(candle) {
@@ -81,7 +113,10 @@ function selectCandlesForTechnicals(candles, minCount = 20) {
 }
 
 // 📊 Deep scan single symbol for swing
-async function deepScanSwingSymbol(symbol) {
+// backgroundMode=true → Yahoo-only path (no NSE mutex calls) + skip the 3
+// NSE-dependent enrichment services.  Makes background scans fast regardless
+// of NSE availability.  buildProfessionalGate handles null inputs gracefully.
+async function deepScanSwingSymbol(symbol, { backgroundMode = false } = {}) {
   try {
     const scanSymbol = extractSymbol(symbol);
     if (!scanSymbol) return { symbol: String(symbol ?? ''), error: 'Invalid NSE symbol' };
@@ -92,26 +127,39 @@ async function deepScanSwingSymbol(symbol) {
       return { symbol, error: 'Invalid NSE symbol' };
     }
 
-    const resolvedSymbol = await resolveNSESymbol(symbol);
-    const gapData = await fetchGapData(resolvedSymbol);
-    const candles = await fetchOHLCV(resolvedSymbol, Math.max(60, 14 + 20));
+    // backgroundMode: bypass resolveNSESymbol + use Yahoo-only gap fetch so the
+    // background scan never serialises through the NSE mutex.
+    const resolvedSymbol = backgroundMode ? normalized : await resolveNSESymbol(symbol);
+    const gapData = backgroundMode
+      ? await fetchGapDataFromYahoo(normalized)
+      : await fetchGapData(resolvedSymbol);
+    const candles = await fetchOHLCV(normalized, Math.max(60, 14 + 20));
     const technicalCandles = selectCandlesForTechnicals(candles, 20);
     const closes = technicalCandles.map(c => c.close);
     const lastCandle = technicalCandles[technicalCandles.length - 1] || candles[candles.length - 1];
     const rsi = computeRSI(closes, 14);
     
-    const volumeData = detectVolumeSpike(technicalCandles);
-    const swingVwap = calculateSwingVWAP(technicalCandles, 5);
+    const volumeData     = detectVolumeSpike(technicalCandles);
+    const swingVwap      = calculateSwingVWAP(technicalCandles, 5);
     const { support, resistance } = supportResistance(technicalCandles);
-    const volatilityPct = estimateATRPercent(technicalCandles, 14);
-    
+    const volatilityPct  = estimateATRPercent(technicalCandles, 14);
+    const emaStack       = getEMAStack(technicalCandles);
+    const macd           = calculateMACD(closes);
+    const bollingerBands = calculateBollingerBands(technicalCandles);
+    const volumeTrend    = getVolumeTrend(technicalCandles);
+    const adx            = calculateADX(technicalCandles);
+    const supertrend     = calculateSupertrend(technicalCandles);
+    const obvData        = calculateOBV(technicalCandles);
+    const candlePattern  = detectCandlePattern(technicalCandles);
+
     const candleColor = lastCandle
       ? (lastCandle.close > lastCandle.open ? 'green' : lastCandle.close < lastCandle.open ? 'red' : 'neutral')
       : 'neutral';
 
     const swingView = evaluateSwing({
       rsi, gapOpenPct: gapData.gapOpenPct, gapNowPct: gapData.gapNowPct, volumeSpike: volumeData.volumeSpike,
-      price: gapData.currentPrice, swingVWAP: swingVwap, support, resistance
+      price: gapData.currentPrice, swingVWAP: swingVwap, support, resistance,
+      emaStack, adx, supertrend, candlePattern, obvData, volatilityPct
     });
 
     const swingEntryPriceData = calculateSwingEntryPrice({
@@ -120,14 +168,95 @@ async function deepScanSwingSymbol(symbol) {
       volatilityPct
     });
 
+    // backgroundMode: skip the 3 NSE-dependent enrichment services
+    const [eventRisk, microstructure, marketActivity] = backgroundMode
+      ? [null, null, null]
+      : await Promise.all([
+          getEventRiskProfile(symbol),
+          fetchMicrostructureSnapshot(symbol),
+          fetchMarketActivityProfile(symbol, { biasDirection: 'long' })
+        ]);
+    const professionalGate = buildProfessionalGate({
+      mode: 'swing',
+      signalView: swingView,
+      eventRisk,
+      microstructure,
+      marketActivity,
+    });
+
     return {
       symbol, normalizedSymbol: normalized, companyName: gapData.companyName || symbol,
       gapOpenPct: gapData.gapOpenPct, gapNowPct: gapData.gapNowPct,
       prevClose: gapData.prevClose, open: gapData.open, currentPrice: gapData.currentPrice,
       marketCap: gapData.marketCap, priceSource: gapData.priceSource, rsi, candleColor,
-      volume: volumeData, vwap: swingVwap, swingVwap: swingVwap, support, resistance,
+      volume: volumeData, vwap: swingVwap, swingVwap, support, resistance,
       volatilityPct: Number.isFinite(volatilityPct) ? Number(volatilityPct.toFixed(2)) : null,
+
+      // ── EMA Regime ────────────────────────────────────────────────────────
+      emaTrend:     emaStack?.regime      ?? 'unknown',
+      ema20:        emaStack?.ema20        ?? null,
+      ema50:        emaStack?.ema50        ?? null,
+      bullishStack: emaStack?.bullishStack ?? null,
+      bearishStack: emaStack?.bearishStack ?? null,
+
+      // ── MACD ──────────────────────────────────────────────────────────────
+      macd: {
+        value:        macd?.macd         ?? null,
+        signal:       macd?.signal       ?? null,
+        histogram:    macd?.histogram    ?? null,
+        bullish:      macd?.bullish      ?? null,
+        bullishCross: macd?.bullishCross ?? null,
+        histExpanding: macd?.histExpanding ?? null,
+      },
+
+      // ── Bollinger Bands ───────────────────────────────────────────────────
+      bollingerBands: {
+        upper:     bollingerBands?.upper     ?? null,
+        middle:    bollingerBands?.middle    ?? null,
+        lower:     bollingerBands?.lower     ?? null,
+        squeeze:   bollingerBands?.squeeze   ?? null,
+        percentB:  bollingerBands?.percentB  ?? null,
+        bandwidth: bollingerBands?.bandwidth ?? null,
+      },
+
+      // ── Volume Trend ──────────────────────────────────────────────────────
+      volumeTrend: volumeTrend?.trend ?? 'unknown',
+
+      // ── ADX (trend strength) ──────────────────────────────────────────────
+      adx: {
+        value:       adx?.adx       ?? null,
+        plusDI:      adx?.plusDI    ?? null,
+        minusDI:     adx?.minusDI   ?? null,
+        trending:    adx?.trending  ?? null,
+        strongTrend: adx?.strongTrend ?? null,
+        direction:   adx?.direction ?? null,
+      },
+
+      // ── Supertrend ────────────────────────────────────────────────────────
+      supertrend: {
+        trend:          supertrend?.trend          ?? null,
+        supertrendLine: supertrend?.supertrendLine ?? null,
+        crossUp:        supertrend?.crossUp        ?? null,
+        crossDown:      supertrend?.crossDown      ?? null,
+        distancePct:    supertrend?.distancePct    ?? null,
+      },
+
+      // ── OBV ───────────────────────────────────────────────────────────────
+      obv: {
+        value:      obvData?.obv        ?? null,
+        rising:     obvData?.rising     ?? null,
+        divergence: obvData?.divergence ?? 'none',
+      },
+
+      // ── Candlestick Pattern ───────────────────────────────────────────────
+      candlePattern: {
+        pattern:   candlePattern?.pattern   ?? 'none',
+        direction: candlePattern?.direction ?? 'neutral',
+        strength:  candlePattern?.strength  ?? 'none',
+      },
+
       resolvedSymbol, swingView, finalSentiment: swingView.sentiment,
+      eventRisk, microstructure, marketActivity, professionalGate,
       entryPrice: swingEntryPriceData.entryPrice, stopLoss: swingEntryPriceData.stopLoss,
       target1: swingEntryPriceData.target1, target2: swingEntryPriceData.target2,
       entryReason: swingEntryPriceData.entryReason, entryType: swingEntryPriceData.entryType,
@@ -136,7 +265,12 @@ async function deepScanSwingSymbol(symbol) {
       riskRewardAfterCosts: swingEntryPriceData.riskRewardAfterCosts,
       riskRewardGross: swingEntryPriceData.riskRewardGross,
       estimatedRoundTripCostPerShare: swingEntryPriceData.estimatedRoundTripCostPerShare,
-      estimatedRoundTripCostPct: swingEntryPriceData.estimatedRoundTripCostPct
+      estimatedRoundTripCostPct: swingEntryPriceData.estimatedRoundTripCostPct,
+
+      // ── Position Sizing (₹1L model) ───────────────────────────────────────
+      suggestedQty:           swingEntryPriceData.suggestedQty           ?? null,
+      suggestedPositionValue: swingEntryPriceData.suggestedPositionValue ?? null,
+      capitalUtilizationPct:  swingEntryPriceData.capitalUtilizationPct  ?? null,
     };
   } catch (e) {
     return { symbol, error: e.message || 'Failed to process symbol' };
@@ -152,14 +286,18 @@ async function startSwingBackgroundScan() {
   swingCache.error = null;
 
   try {
-    const fast50 = await fastMarketScan(); // Get top 50 stocks
-    console.log(`📊 Background scanning ${fast50.length} symbols for swing...`);
+    const fast50 = await fastMarketScan();
+    const symbols = fast50;
+    console.log(`📊 Background scanning ${symbols.length} symbols from Nifty 500 for swing (fast mode)...`);
 
     const results = await mapWithConcurrency(
-      fast50.slice(0, 50),
-      3, // Process 3 symbols at a time
-      async (stock) => deepScanSwingSymbol(stock?.symbol ?? stock)
+      symbols,
+      5, // Higher concurrency safe — fewer calls per symbol
+      async (stock) => deepScanSwingSymbol(stock?.symbol ?? stock, { backgroundMode: true })
     );
+
+    const errored = results.filter(r => r.error);
+    if (errored.length) console.warn(`⚠️  Swing scan: ${errored.length}/${results.length} symbols errored`);
 
     const quality = buildQualitySwingList(results);
     const lifecycle = await applySwingLifecycle(quality.stocks);
@@ -231,6 +369,7 @@ function computeSwingQualityScore(stock) {
   const entryType = String(stock?.entryType || '');
   const label = String(stock?.swingView?.label || '');
   const volumeSpike = Boolean(stock?.volume?.volumeSpike);
+  const professionalGate = stock?.professionalGate || {};
 
   let score = 0;
 
@@ -259,6 +398,40 @@ function computeSwingQualityScore(stock) {
   else score += 3;
   if (aboveStructure) score += 6;
 
+  // EMA regime alignment — trend-confirmation bonus / counter-trend penalty
+  const emaTrend    = String(stock?.emaTrend || '');
+  const bullStack   = Boolean(stock?.bullishStack);
+  const bearStack   = Boolean(stock?.bearishStack);
+  if (bullStack)                                  score += 10; // price > ema20 > ema50
+  else if (emaTrend === 'bullish' && !bearStack)  score += 5;
+  else if (bearStack)                             score -= 8;  // going long into bearish stack = risk
+
+  // ADX trend strength
+  if (stock?.adx?.strongTrend)   score += 10;
+  else if (stock?.adx?.trending) score += 5;
+
+  // Supertrend fresh cross (highest conviction entry window for swing)
+  if (stock?.supertrend?.crossUp)            score += 12;
+  else if (stock?.supertrend?.trend === 'up') score += 5;
+
+  // OBV divergence (leading institutional signal)
+  if (stock?.obv?.divergence === 'bullish') score += 10;
+  else if (stock?.obv?.rising)              score += 4;
+
+  // Candlestick pattern confirmation
+  if (stock?.candlePattern?.direction === 'bullish' && stock?.candlePattern?.strength === 'strong') score += 6;
+
+  // MACD momentum confirmation
+  if (stock?.macd?.bullishCross)  score += 8;
+  else if (stock?.macd?.bullish)  score += 4;
+  if (stock?.macd?.histExpanding) score += 3;
+
+  // Volume trend conviction
+  if (stock?.volumeTrend === 'rising') score += 5;
+
+  // Bollinger squeeze breakout
+  if (stock?.bollingerBands?.squeeze === false && (stock?.bollingerBands?.percentB ?? 0) > 0.65) score += 5;
+
   if (rsi != null) {
     if (rsi >= 45 && rsi <= 62) score += 8;
     else if (rsi >= 40 && rsi <= 66) score += 4;
@@ -275,6 +448,8 @@ function computeSwingQualityScore(stock) {
     if (volPct > 6.2) score -= 6;
     else if (volPct >= 2.0 && volPct <= 4.8) score += 3;
   }
+
+  score -= Math.max(0, toFinite(professionalGate.scorePenalty) ?? 0);
 
   return Math.round(score);
 }
@@ -298,6 +473,7 @@ function buildQualitySwingList(results) {
     .filter(stock =>
       !stock.error &&
       !stock.filtered &&
+      !stock?.professionalGate?.blocked &&
       stock.swingView &&
       stock.swingView.sentiment === 'positive'
     )
@@ -341,11 +517,10 @@ router.post('/', swingScanLimiter, async (req, res) => {
     if (!symbols || symbols.length === 0) {
       if (useTwoStageScan) {
         // TWO-STAGE SCANNING (PRO LEVEL)
-        
         // Stage 1 - Fast scan (cheap) - get 30-50 qualified stocks
         const fastScanResults = await fastMarketScan();
         console.log(`🔍 Swing Stage 1: Fast scanned ${fastScanResults.length} stocks`);
-        
+
         // Stage 2 - Deep scan (expensive) - apply full technical analysis
         console.log('🔬 Swing Stage 2: Deep scanning with swing analysis...');
         symbolsToScan = fastScanResults.map(stock => stock.symbol);
@@ -362,8 +537,11 @@ router.post('/', swingScanLimiter, async (req, res) => {
 
     console.log(`📈 Processing ${symbolsToScan.length} symbols for swing analysis...`);
 
-    const results = await Promise.all(
-      symbolsToScan.map(async (symbol) => {
+    const results = await scanInBatches(
+      symbolsToScan,
+      50,
+      3,
+      async (symbol) => {
         try {
           const normalized = normalizeIndian(symbol);
           if (isLikelyInvalidSymbol(symbol)) {
@@ -398,10 +576,18 @@ router.post('/', swingScanLimiter, async (req, res) => {
           /* =====================
              TECHNICALS
           ====================== */
-          const volumeData = detectVolumeSpike(technicalCandles);
-          const swingVwap = calculateSwingVWAP(technicalCandles, 5); // 5-day VWAP for swing
+          const volumeData     = detectVolumeSpike(technicalCandles);
+          const swingVwap      = calculateSwingVWAP(technicalCandles, 5); // 5-day VWAP for swing
           const { support, resistance } = supportResistance(technicalCandles);
-          const volatilityPct = estimateATRPercent(technicalCandles, 14);
+          const volatilityPct  = estimateATRPercent(technicalCandles, 14);
+          const emaStack       = getEMAStack(technicalCandles);
+          const macd           = calculateMACD(closes);
+          const bollingerBands = calculateBollingerBands(technicalCandles);
+          const volumeTrend    = getVolumeTrend(technicalCandles);
+          const adx            = calculateADX(technicalCandles);
+          const supertrend     = calculateSupertrend(technicalCandles);
+          const obvData        = calculateOBV(technicalCandles);
+          const candlePattern  = detectCandlePattern(technicalCandles);
 
           const candleColor =
             lastCandle && lastCandle.close > lastCandle.open
@@ -419,9 +605,10 @@ router.post('/', swingScanLimiter, async (req, res) => {
             gapNowPct: gapData.gapNowPct,
             volumeSpike: volumeData.volumeSpike,
             price: gapData.currentPrice,
-            swingVWAP: swingVwap, // Explicit swing VWAP parameter
+            swingVWAP: swingVwap,
             support,
-            resistance
+            resistance,
+            emaStack, adx, supertrend, candlePattern, obvData, volatilityPct
           });
 
           /* =====================
@@ -463,6 +650,38 @@ router.post('/', swingScanLimiter, async (req, res) => {
             };
           }
 
+          const [eventRisk, microstructure, marketActivity] = await Promise.all([
+            getEventRiskProfile(symbol),
+            fetchMicrostructureSnapshot(symbol),
+            fetchMarketActivityProfile(symbol, { biasDirection: 'long' })
+          ]);
+          const professionalGate = buildProfessionalGate({
+            mode: 'swing',
+            signalView: swingView,
+            eventRisk,
+            microstructure,
+            marketActivity,
+          });
+
+          if (professionalGate.blocked) {
+            return {
+              symbol,
+              normalizedSymbol: normalized,
+              companyName: gapData.companyName || symbol,
+              currentPrice: gapData.currentPrice,
+              swingView: {
+                label: 'Professional Risk Gate – Blocked',
+                sentiment: 'negative',
+                reasons: professionalGate.reasons
+              },
+              eventRisk,
+              microstructure,
+              marketActivity,
+              professionalGate,
+              filtered: true
+            };
+          }
+
           /* =====================
              RESPONSE
           ====================== */
@@ -484,16 +703,83 @@ router.post('/', swingScanLimiter, async (req, res) => {
             candleColor,
 
             volume: volumeData,
-            vwap: swingVwap, // Use swing VWAP as primary VWAP for swing
-            swingVwap: swingVwap, // Explicit swing VWAP for frontend
+            vwap: swingVwap,
+            swingVwap,
             support,
             resistance,
             volatilityPct: Number.isFinite(volatilityPct) ? Number(volatilityPct.toFixed(2)) : null,
 
+            // ── EMA Regime ────────────────────────────────────────────────────
+            emaTrend:     emaStack?.regime      ?? 'unknown',
+            ema20:        emaStack?.ema20        ?? null,
+            ema50:        emaStack?.ema50        ?? null,
+            bullishStack: emaStack?.bullishStack ?? null,
+            bearishStack: emaStack?.bearishStack ?? null,
+
+            // ── MACD ──────────────────────────────────────────────────────────
+            macd: {
+              value:        macd?.macd         ?? null,
+              signal:       macd?.signal       ?? null,
+              histogram:    macd?.histogram    ?? null,
+              bullish:      macd?.bullish      ?? null,
+              bullishCross: macd?.bullishCross ?? null,
+              histExpanding: macd?.histExpanding ?? null,
+            },
+
+            // ── Bollinger Bands ───────────────────────────────────────────────
+            bollingerBands: {
+              upper:     bollingerBands?.upper     ?? null,
+              middle:    bollingerBands?.middle    ?? null,
+              lower:     bollingerBands?.lower     ?? null,
+              squeeze:   bollingerBands?.squeeze   ?? null,
+              percentB:  bollingerBands?.percentB  ?? null,
+              bandwidth: bollingerBands?.bandwidth ?? null,
+            },
+
+            // ── Volume Trend ──────────────────────────────────────────────────
+            volumeTrend: volumeTrend?.trend ?? 'unknown',
+
+            // ── ADX ──────────────────────────────────────────────────────────
+            adx: {
+              value:       adx?.adx       ?? null,
+              plusDI:      adx?.plusDI    ?? null,
+              minusDI:     adx?.minusDI   ?? null,
+              trending:    adx?.trending  ?? null,
+              strongTrend: adx?.strongTrend ?? null,
+              direction:   adx?.direction ?? null,
+            },
+
+            // ── Supertrend ───────────────────────────────────────────────────
+            supertrend: {
+              trend:          supertrend?.trend          ?? null,
+              supertrendLine: supertrend?.supertrendLine ?? null,
+              crossUp:        supertrend?.crossUp        ?? null,
+              crossDown:      supertrend?.crossDown      ?? null,
+              distancePct:    supertrend?.distancePct    ?? null,
+            },
+
+            // ── OBV ──────────────────────────────────────────────────────────
+            obv: {
+              value:      obvData?.obv        ?? null,
+              rising:     obvData?.rising     ?? null,
+              divergence: obvData?.divergence ?? 'none',
+            },
+
+            // ── Candlestick Pattern ──────────────────────────────────────────
+            candlePattern: {
+              pattern:   candlePattern?.pattern   ?? 'none',
+              direction: candlePattern?.direction ?? 'neutral',
+              strength:  candlePattern?.strength  ?? 'none',
+            },
+
             resolvedSymbol,
             swingView,
+            eventRisk,
+            microstructure,
+            marketActivity,
+            professionalGate,
 
-            // Swing entry price information
+            // ── Swing entry price information ─────────────────────────────────
             entryPrice: swingEntryPriceData.entryPrice,
             stopLoss: swingEntryPriceData.stopLoss,
             target1: swingEntryPriceData.target1,
@@ -505,7 +791,12 @@ router.post('/', swingScanLimiter, async (req, res) => {
             riskRewardAfterCosts: swingEntryPriceData.riskRewardAfterCosts,
             riskRewardGross: swingEntryPriceData.riskRewardGross,
             estimatedRoundTripCostPerShare: swingEntryPriceData.estimatedRoundTripCostPerShare,
-            estimatedRoundTripCostPct: swingEntryPriceData.estimatedRoundTripCostPct
+            estimatedRoundTripCostPct: swingEntryPriceData.estimatedRoundTripCostPct,
+
+            // ── Position Sizing (₹1L model) ────────────────────────────────────
+            suggestedQty:           swingEntryPriceData.suggestedQty           ?? null,
+            suggestedPositionValue: swingEntryPriceData.suggestedPositionValue ?? null,
+            capitalUtilizationPct:  swingEntryPriceData.capitalUtilizationPct  ?? null,
           };
         } catch (e) {
           return {
@@ -513,7 +804,8 @@ router.post('/', swingScanLimiter, async (req, res) => {
             error: e.message || 'Failed to process symbol'
           };
         }
-      })
+      },
+      '📦 Swing deep scan'
     );
 
     const quality = buildQualitySwingList(results);
@@ -530,6 +822,7 @@ router.post('/', swingScanLimiter, async (req, res) => {
         scanType: useTwoStageScan ? 'two-stage-institutional' : 'improved-filter',
         stage1Processed: useTwoStageScan ? symbolsToScan.length : null,
         institutionalFiltering: true,
+        professionalDeskUpgrades: ['event-risk-gate', 'microstructure-gate', 'historical-backtest-ready'],
         riskRewardThreshold: '1:1 minimum',
         qualityMode: 'balanced-adaptive',
         qualityScoreThreshold: quality.qualityThreshold,
@@ -543,4 +836,77 @@ router.post('/', swingScanLimiter, async (req, res) => {
   }
 });
 
+router.post('/backtest', async (req, res) => {
+  const {
+    symbol,
+    years = 3,
+    rsiPeriod = 14,
+    maxHoldBars = 15,
+    thresholds = {},
+  } = req.body || {};
+
+  if (!symbol || typeof symbol !== 'string') {
+    return res.status(400).json({ error: 'symbol is required' });
+  }
+
+  try {
+    const result = await runSwingBacktest({
+      symbol,
+      years,
+      rsiPeriod,
+      maxHoldBars,
+      thresholds,
+    });
+
+    res.json({
+      ...result,
+      compliance,
+      meta: {
+        backtestType: 'swing-daily-ohlcv',
+        thresholdTuningReady: true,
+      }
+    });
+  } catch (error) {
+    console.error('swing backtest error', error);
+    res.status(500).json({ error: 'Failed to run swing backtest' });
+  }
+});
+
+router.post('/backtest/sweep', async (req, res) => {
+  const {
+    symbol,
+    years = 3,
+    rsiPeriod = 14,
+    maxHoldBars = 15,
+    sweep = {},
+  } = req.body || {};
+
+  if (!symbol || typeof symbol !== 'string') {
+    return res.status(400).json({ error: 'symbol is required' });
+  }
+
+  try {
+    const result = await runSwingThresholdSweep({
+      symbol,
+      years,
+      rsiPeriod,
+      maxHoldBars,
+      sweep,
+    });
+
+    res.json({
+      ...result,
+      compliance,
+      meta: {
+        backtestType: 'swing-threshold-sweep',
+        researchOnly: true,
+      }
+    });
+  } catch (error) {
+    console.error('swing threshold sweep error', error);
+    res.status(500).json({ error: 'Failed to run threshold sweep' });
+  }
+});
+
+export { startSwingBackgroundScan };
 export default router;

@@ -11,7 +11,8 @@ export function evaluateFundamentals({
   let reasons = []
 
   // 1️⃣ Earnings Quality & Growth Trend
-  if (revenueGrowth !== null && profitGrowth !== null) {
+  // Use != null (loose) to guard against both null and undefined inputs
+  if (revenueGrowth != null && profitGrowth != null) {
     if (revenueGrowth > 15 && profitGrowth > 20) {
       score += 3
       reasons.push('Exceptional earnings growth with strong profitability')

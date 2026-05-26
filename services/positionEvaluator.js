@@ -17,7 +17,14 @@ export function evaluateSwing({
   price,
   swingVWAP,
   support,
-  resistance
+  resistance,
+  emaStack      = null,  // getEMAStack() — daily trend regime
+  adx           = null,  // calculateADX() — swing trend strength
+  supertrend    = null,  // calculateSupertrend() — daily trend line
+  candlePattern = null,  // detectCandlePattern() — candlestick signal
+  obvData       = null,  // calculateOBV() — volume divergence
+  volatilityPct = null,  // estimateATRPercent() — for gap significance normalization
+  thresholds    = {}
 }) {
   // 🛡️ DEFENSIVE GUARD: Check swingVWAP availability
   if (!swingVWAP || !isFinite(swingVWAP)) {
@@ -42,6 +49,32 @@ export function evaluateSwing({
     Number.isFinite(price) && Number.isFinite(swingVWAP) && swingVWAP > 0
       ? ((price - swingVWAP) / swingVWAP) * 100
       : null
+
+  // ── Gap significance normalized by ATR ───────────────────────────────────────
+  // A fixed-% gap threshold treats a 2% gap the same on Wipro (ATR ~0.9%) and on
+  // a small-cap (ATR ~3%).  The former is a 2.2× ATR event (significant); the
+  // latter is only 0.67× ATR (routine daily noise).  We compute gap as a multiple
+  // of the stock's own ATR and use that for thresholds where it matters.
+  const safeAtrPct       = (Number.isFinite(volatilityPct) && volatilityPct > 0)
+                             ? volatilityPct
+                             : null
+  const gapInATR         = safeAtrPct ? Math.abs(effectiveGap) / safeAtrPct : null
+  const gapIsLargeByATR  = gapInATR != null ? gapInATR >= 1.5 : Math.abs(effectiveGap) >= 2.5
+
+  // ── New indicator context ────────────────────────────────────────────────────
+  const swingAdxValue     = adx?.adx ?? null
+  const swingAdxTrendMin  = Number.isFinite(thresholds?.swingAdxTrendMin) ? Number(thresholds.swingAdxTrendMin) : 20
+  const swingAdxStrongMin = Number.isFinite(thresholds?.swingAdxStrongMin) ? Number(thresholds.swingAdxStrongMin) : 30
+  const highConvictionRsiMin = Number.isFinite(thresholds?.highConvictionRsiMin) ? Number(thresholds.highConvictionRsiMin) : 45
+  const highConvictionRsiMax = Number.isFinite(thresholds?.highConvictionRsiMax) ? Number(thresholds.highConvictionRsiMax) : 65
+  const breakoutRsiMax = Number.isFinite(thresholds?.breakoutRsiMax) ? Number(thresholds.breakoutRsiMax) : 68
+  const swingAdxTrending  = swingAdxValue != null ? swingAdxValue >= swingAdxTrendMin : adx?.trending === true
+  const swingAdxStrong    = swingAdxValue != null ? swingAdxValue >= swingAdxStrongMin : adx?.strongTrend === true
+  const swingStBullish    = supertrend?.trend   === 'up'
+  const swingStCrossUp    = supertrend?.crossUp === true
+  const swingCandleBull   = candlePattern?.direction === 'bullish' && candlePattern?.strength === 'strong'
+  const swingOBVBullDiv   = obvData?.divergence === 'bullish'
+  const swingOBVRising    = obvData?.rising === true
 
   // Hard blockers for institutional swing quality
   if (effectiveGap <= -4.0) {
@@ -68,10 +101,8 @@ export function evaluateSwing({
     }
   }
 
-  // Gap segregation - eliminate event-driven volatility
-  const isLargeGap = Math.abs(effectiveGap) >= 2.5
-
-  if (isLargeGap && effectiveGap < 0 && !volumeSpike) {
+  // Gap segregation - eliminate event-driven volatility (ATR-normalized)
+  if (gapIsLargeByATR && effectiveGap < 0 && !volumeSpike) {
     return {
       label: 'Large Gap – Avoid Swing',
       sentiment: 'negative',
@@ -99,12 +130,35 @@ export function evaluateSwing({
     }
   }
 
+  // EMA regime for swing (daily candles)
+  const swingEmaBullish = emaStack?.bullishStack === true
+  const swingEmaBearish = emaStack?.bearishStack === true
+  const swingEmaTrend   = emaStack?.regime ?? 'unknown'
+
+  // ── ADX swing chop filter ──────────────────────────────────────────────────
+  // If ADX < 20 and the gap is small, this is a range-bound stock —
+  // swing trades require a trend to develop; watchlist it instead.
+  if (
+    swingAdxValue != null &&
+    !swingAdxTrending &&
+    Math.abs(effectiveGap) < 1.0 &&
+    !volumeSpike
+  ) {
+    return {
+      label: 'No Swing Trend – ADX Below Threshold',
+      sentiment: 'neutral',
+      emaTrend: swingEmaTrend,
+      blockerReason: 'adx_no_trend',
+      reasons: [`ADX ${swingAdxValue} — no confirmed trend, stock is ranging. Add to watchlist for breakout.`]
+    }
+  }
+
   /* =========================
      1️⃣ HIGH-CONVICTION SWING
   ========================== */
   if (
-    rsi >= 45 &&
-    rsi <= 65 &&
+    rsi >= highConvictionRsiMin &&
+    rsi <= highConvictionRsiMax &&
     effectiveGap >= -1.0 &&
     effectiveGap <= 5.5 &&
     volumeOK &&
@@ -114,10 +168,31 @@ export function evaluateSwing({
     reasons.push('Momentum in favorable RSI zone')
     reasons.push('Price above swing VWAP indicates bullish structure')
     reasons.push(volumeSpike ? 'Volume confirms participation' : 'Building momentum')
+    if (swingEmaBullish)     reasons.push('Daily EMA stack bullish — trend fully aligned')
+    if (swingEmaBearish)     reasons.push('⚠️ Daily EMA stack bearish — swing against medium-term trend')
+    if (swingAdxStrong)      reasons.push(`ADX ${swingAdxValue} — strong confirmed trend, swing has institutional backing`)
+    if (swingStCrossUp)      reasons.push('🔥 Daily Supertrend just flipped bullish — high-conviction entry window')
+    else if (swingStBullish) reasons.push('Daily Supertrend up — dynamic trailing stop aligned')
+    if (swingCandleBull)     reasons.push(`${candlePattern.pattern} pattern adds timing confirmation`)
+    if (swingOBVBullDiv)     reasons.push('📊 OBV bullish divergence — institutional accumulation precedes price')
+    else if (swingOBVRising) reasons.push('OBV rising — volume confirming swing momentum')
+
+    // In a bearish daily EMA regime a bullish swing setup is fighting the tape.
+    // Institutional swing desks require EMA alignment; flag as confirmation-needed.
+    if (swingEmaBearish) {
+      return {
+        label: 'High-Quality Swing Setup – EMA Conflict',
+        sentiment: 'positive',
+        emaTrend: swingEmaTrend,
+        blockerReason: 'counter_trend_ema',
+        reasons
+      }
+    }
 
     return {
       label: 'High-Quality Swing Setup',
       sentiment: 'positive',
+      emaTrend: swingEmaTrend,
       reasons
     }
   }
@@ -170,7 +245,7 @@ export function evaluateSwing({
   ========================== */
   if (
     rsi >= 45 &&
-    rsi <= 68 && // 🔧 FIX: Cap RSI lower to avoid distribution tops
+    rsi <= breakoutRsiMax && // 🔧 FIX: Cap RSI lower to avoid distribution tops
     breakoutConfirmed &&
     effectiveGap > -1.5 &&
     effectiveGap <= 5.0 // 🔧 FIX: Add gap filter to avoid chasing tops
@@ -314,7 +389,52 @@ export function evaluateSwing({
 import { evaluateFundamentals } from './fundamentalAnalyzer.js'
 
 const DEFAULT_INTRADAY_ROUND_TRIP_COST_BPS = Number(process.env.INTRADAY_ROUND_TRIP_COST_BPS || 18)
-const DEFAULT_SWING_ROUND_TRIP_COST_BPS = Number(process.env.SWING_ROUND_TRIP_COST_BPS || 30)
+const DEFAULT_SWING_ROUND_TRIP_COST_BPS    = Number(process.env.SWING_ROUND_TRIP_COST_BPS    || 30)
+
+// ── Position-sizing constants ────────────────────────────────────────────────
+// Set TRADING_CAPITAL in your .env to override (e.g. 200000 for ₹2L).
+// MAX_RISK_PER_TRADE_PCT: never risk more than this fraction of capital on one trade.
+// MAX_POSITION_PCT:       never deploy more than this fraction in a single stock
+//                         (concentration limit — important for sub-₹5L portfolios).
+const TRADING_CAPITAL        = Number(process.env.TRADING_CAPITAL         || 100_000)  // ₹1,00,000 default
+const MAX_RISK_PER_TRADE_PCT = Number(process.env.MAX_RISK_PER_TRADE_PCT  || 0.01)     // 1 % of capital
+const MAX_POSITION_PCT       = Number(process.env.MAX_POSITION_PCT        || 0.25)     // 25 % max per position
+
+/**
+ * Suggests quantity and position size for a given entry + stop combination.
+ *
+ * Logic:
+ *  1. Risk budget  = TRADING_CAPITAL × MAX_RISK_PER_TRADE_PCT  (e.g. ₹1,000 on ₹1L)
+ *  2. suggestedQty = floor(risk budget / risk-per-share)
+ *  3. Hard cap:    positionValue must not exceed TRADING_CAPITAL × MAX_POSITION_PCT
+ *  4. Floor:       at least 1 share if the stock is within capital
+ */
+function suggestPositionSize(entryPrice, riskPerShare) {
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0 ||
+      !Number.isFinite(riskPerShare) || riskPerShare <= 0) {
+    return { suggestedQty: null, suggestedPositionValue: null, capitalUtilizationPct: null }
+  }
+  const riskBudget   = TRADING_CAPITAL * MAX_RISK_PER_TRADE_PCT
+  const maxCapDeploy = TRADING_CAPITAL * MAX_POSITION_PCT
+  const qtyByRisk    = Math.floor(riskBudget / riskPerShare)
+  const qtyByCap     = Math.floor(maxCapDeploy / entryPrice)
+  const suggestedQty = Math.max(0, Math.min(qtyByRisk, qtyByCap))
+  if (suggestedQty === 0 && entryPrice <= TRADING_CAPITAL) {
+    // At minimum suggest 1 share so the user isn't left with nothing
+    const oneShareValue = entryPrice
+    return {
+      suggestedQty: 1,
+      suggestedPositionValue: +oneShareValue.toFixed(2),
+      capitalUtilizationPct: +((oneShareValue / TRADING_CAPITAL) * 100).toFixed(1)
+    }
+  }
+  const positionValue = suggestedQty * entryPrice
+  return {
+    suggestedQty,
+    suggestedPositionValue: +positionValue.toFixed(2),
+    capitalUtilizationPct: +((positionValue / TRADING_CAPITAL) * 100).toFixed(1)
+  }
+}
 
 function calculateRiskReward(entryPrice, stopLoss, target1, direction = 'long') {
   const safeDirection = direction === 'short' ? 'short' : 'long'
@@ -588,11 +708,33 @@ export function evaluateLongTerm({ rsi, marketCap, fundamentals }) {
     ...fundamentals
   })
 
-  const goodTiming = rsi >= 38 && rsi <= 45
-  const neutralTiming = rsi > 45 && rsi <= 60
+  // RSI timing zones — AMC / HNI accumulation logic:
+  //
+  //  38–55  "Optimal Accumulation Zone"
+  //         Business is NOT in crisis (RSI not in freefall) but is NOT being
+  //         chased by momentum traders either. This is where large AMC funds
+  //         quietly build multi-year positions. Includes the classic "buy fear
+  //         without breakdown" sweet spot (38–45) AND the SIP build-up range
+  //         (45–55) that most long-term investors use for systematic buying.
+  //
+  //  55–65  "Healthy Trend Zone"
+  //         Business has price confirmation; position-sizing should be smaller
+  //         (don't chase the first leg). Still valid for quality businesses;
+  //         generates a 'neutral' sentiment nudging the user to "accumulate on
+  //         dips" rather than buying aggressively at current prices.
+  //
+  //  < 38   "Timing Risk" — business quality determines whether to step in.
+  //         Score ≥ 4 is watchlist-worthy; score ≥ 5 is brave accumulation.
+  //
+  //  > 65   "Overheated" — defer fresh buying regardless of business quality.
+  const primeAccumulation = rsi >= 38 && rsi <= 55   // old ceiling was 45; widened to 55
+  const healthyTrend      = rsi > 55 && rsi <= 65
 
-  // 1️⃣ Elite long-term entry (rare)
-  if (score >= 5 && goodTiming) {
+  // 1️⃣ Elite long-term entry — highest-conviction buy zone
+  //    High-quality business (score ≥ 5) + price in prime accumulation zone.
+  //    This is what top AMC fund managers dream of: buying great businesses
+  //    when sentiment is muted but fundamentals are intact.
+  if (score >= 5 && primeAccumulation) {
     return {
       label: 'High-Conviction Long-Term Accumulation',
       sentiment: 'positive',
@@ -600,16 +742,33 @@ export function evaluateLongTerm({ rsi, marketCap, fundamentals }) {
     }
   }
 
-  // 2️⃣ Strong business, normal accumulation
-  if (score >= 4 && neutralTiming) {
+  // 2️⃣ Strong business — systematic accumulation zone
+  //    Score ≥ 4 in the prime zone is a clear SIP / staggered-entry buy.
+  //    Previously 'neutral', but this is exactly the signal HNI portfolios
+  //    are built on — quality + reasonable timing = BUY with sizing discipline.
+  if (score >= 4 && primeAccumulation) {
     return {
       label: 'Quality Business – Accumulate on Dips',
+      sentiment: 'positive',
+      reasons
+    }
+  }
+
+  // 3️⃣ Strong business, healthy trend — position with smaller size
+  //    Price is trending (RSI 55-65), not distressed. Valid for adding to
+  //    existing positions or initiating a starter tranche; avoid heavy sizing.
+  if (score >= 4 && healthyTrend) {
+    return {
+      label: 'Quality Business – Wait for Better Entry',
       sentiment: 'neutral',
       reasons
     }
   }
 
-  // 3️⃣ Capitulation zone (watch, not rush)
+  // 4️⃣ Capitulation zone — watch for stabilisation before committing
+  //    RSI < 30 = potential knife-catch. Even high-quality businesses need a
+  //    base to form before AMC desks commit capital; 'neutral' keeps it on
+  //    watchlist without triggering a premature buy signal.
   if (rsi < 30 && score >= 4) {
     return {
       label: 'High-Quality Business – Capitulation Zone',
@@ -618,24 +777,25 @@ export function evaluateLongTerm({ rsi, marketCap, fundamentals }) {
     }
   }
 
-  // 4️⃣ Timing risk, business intact
-if (rsi < 38 && score >= 3) {
-  return {
-    label: 'Fundamentals Good, Timing Risky',
-    sentiment: 'neutral',
-    reasons
+  // 5️⃣ Timing risk — business is decent but price action is weak
+  if (rsi < 38 && score >= 3) {
+    return {
+      label: 'Fundamentals Good, Timing Risky',
+      sentiment: 'neutral',
+      reasons
+    }
   }
-}
-if (rsi > 65 && score >= 4) {
-  return {
-    label: 'Strong Business, Overheated Zone – Avoid Fresh Buying',
-    sentiment: 'neutral',
-    reasons
+
+  // 6️⃣ Overheated — strong business but price is extended
+  if (rsi > 65 && score >= 4) {
+    return {
+      label: 'Strong Business, Overheated Zone – Avoid Fresh Buying',
+      sentiment: 'neutral',
+      reasons
+    }
   }
-}
 
-
-  // 5️⃣ Weak setup
+  // 7️⃣ No structural edge
   return {
     label: 'Weak Long-Term Setup',
     sentiment: 'negative',
@@ -940,6 +1100,8 @@ export function calculateSwingEntryPrice({
     effectiveGapPct: effectiveGap
   })
 
+  const sizing = suggestPositionSize(entryPrice, riskPerShare)
+
   return {
     entryPrice,
     stopLoss: Math.round(stopLoss * 100) / 100,
@@ -954,7 +1116,11 @@ export function calculateSwingEntryPrice({
     estimatedRoundTripCostPerShare: rrStats
       ? Math.round(rrStats.estimatedRoundTripCostPerShare * 100) / 100
       : null,
-    estimatedRoundTripCostPct: rrStats?.estimatedRoundTripCostPct ?? null
+    estimatedRoundTripCostPct: rrStats?.estimatedRoundTripCostPct ?? null,
+    // ── Position sizing (based on configured TRADING_CAPITAL) ──────────────
+    suggestedQty:           sizing.suggestedQty,
+    suggestedPositionValue: sizing.suggestedPositionValue,
+    capitalUtilizationPct:  sizing.capitalUtilizationPct
   };
 }
 
@@ -1274,10 +1440,12 @@ export function calculateIntradayEntryPrice({
   }[entryType] ?? 1.35
 
   if (safeDirection === 'short') {
-    if (normalizedRSI <= 32) rr1Base -= 0.15
+    if (normalizedRSI <= 32)      rr1Base -= 0.15
     else if (normalizedRSI >= 52) rr1Base += 0.12
-  } else if (normalizedRSI >= 63) rr1Base -= 0.15
-  else if (normalizedRSI <= 48) rr1Base += 0.12
+  } else {
+    if (normalizedRSI >= 63)      rr1Base -= 0.15
+    else if (normalizedRSI <= 48) rr1Base += 0.12
+  }
 
   if (atrPct >= 2.0) rr1Base -= 0.08
   else if (atrPct <= 0.8) rr1Base += 0.08
@@ -1401,6 +1569,8 @@ export function calculateIntradayEntryPrice({
     effectiveGapPct: gapOpenPct
   })
 
+  const intradaySizing = suggestPositionSize(entryPrice, riskPerShare)
+
   if ((rrNet ?? 0) < 1) {
     return {
       entryPrice,
@@ -1424,7 +1594,8 @@ export function calculateIntradayEntryPrice({
       riskRewardAfterCosts: formatRatio(rrNet),
       riskRewardGross: formatRatio(rrGross),
       estimatedRoundTripCostPerShare: rrStats ? Math.round(rrStats.estimatedRoundTripCostPerShare * 100) / 100 : null,
-      estimatedRoundTripCostPct: rrStats?.estimatedRoundTripCostPct ?? null
+      estimatedRoundTripCostPct: rrStats?.estimatedRoundTripCostPct ?? null,
+      suggestedQty: null, suggestedPositionValue: null, capitalUtilizationPct: null
     }
   }
 
@@ -1441,7 +1612,11 @@ export function calculateIntradayEntryPrice({
     riskRewardAfterCosts: formatRatio(rrNet),
     riskRewardGross: formatRatio(rrGross),
     estimatedRoundTripCostPerShare: rrStats ? Math.round(rrStats.estimatedRoundTripCostPerShare * 100) / 100 : null,
-    estimatedRoundTripCostPct: rrStats?.estimatedRoundTripCostPct ?? null
+    estimatedRoundTripCostPct: rrStats?.estimatedRoundTripCostPct ?? null,
+    // ── Position sizing ────────────────────────────────────────────────────
+    suggestedQty:           intradaySizing.suggestedQty,
+    suggestedPositionValue: intradaySizing.suggestedPositionValue,
+    capitalUtilizationPct:  intradaySizing.capitalUtilizationPct
   }
 }
 
@@ -1466,7 +1641,13 @@ export function evaluateIntraday({
   support,
   resistance,
   candleColor,
-  marketCap
+  marketCap,
+  emaStack      = null,  // getEMAStack() — trend regime
+  adx           = null,  // calculateADX() — trend strength
+  supertrend    = null,  // calculateSupertrend() — dynamic trend line
+  candlePattern = null,  // detectCandlePattern() — single/two-candle patterns
+  obvData       = null,  // calculateOBV() — volume divergence
+  vwapBands     = null   // calculateVWAPBands() — ±1σ/±2σ intraday bands
 }) {
   const reasons = []
   const hasVwap = Number.isFinite(vwap) && vwap > 0;
@@ -1486,6 +1667,52 @@ export function evaluateIntraday({
     nearResistance &&
     !breakoutConfirmed &&
     !breakdownConfirmed
+  // ── EMA trend regime ────────────────────────────────────────────────────────
+  const emaTrend          = emaStack?.regime ?? 'unknown'
+  const emaBullish        = emaStack?.bullishStack === true
+  const emaBearish        = emaStack?.bearishStack === true
+  const emaCounterLong    = emaBearish   // long in a bearish regime
+  const emaCounterShort   = emaBullish   // short in a bullish regime
+
+  // ── Dynamic RSI thresholds (regime-adjusted) ────────────────────────────────
+  // In a confirmed bullish EMA stack RSI commonly stays 60-80 for extended
+  // periods — that is a trending market behaving normally, NOT overbought.
+  // Static thresholds cause the scanner to miss the best trend-following setups.
+  // Adjustment: +7 to upper bound when bullishStack confirmed; -6 to lower bound
+  // when bearishStack confirmed (symmetrical relaxation for shorts).
+  const rsiOverbought = emaBullish ? 72 : 65   // was hard-coded 65 everywhere
+  const rsiOversold   = emaBearish ? 28 : 35   // was hard-coded 35 everywhere
+
+  // ── ADX trend strength ───────────────────────────────────────────────────────
+  // ADX measures how STRONG the trend is, independent of direction.
+  // ADX < 20 = choppy / ranging market → EMA/MACD signals are unreliable noise.
+  // ADX > 25 = trend confirmed → signals become much more reliable.
+  const adxValue      = adx?.adx ?? null
+  const adxTrending   = adx?.trending   === true   // ADX > 20
+  const adxStrong     = adx?.strongTrend === true   // ADX > 30
+
+  // ── Supertrend context ───────────────────────────────────────────────────────
+  const stBullish   = supertrend?.trend    === 'up'
+  const stCrossUp   = supertrend?.crossUp  === true  // fresh bullish flip
+  const stCrossDown = supertrend?.crossDown === true  // fresh bearish flip
+
+  // ── Candlestick pattern ──────────────────────────────────────────────────────
+  const candlePatternDir    = candlePattern?.direction ?? 'neutral'
+  const candlePatternStrong = candlePattern?.strength  === 'strong'
+  const hasStrongBullishBar = candlePatternDir === 'bullish' && candlePatternStrong
+  const hasStrongBearishBar = candlePatternDir === 'bearish' && candlePatternStrong
+
+  // ── OBV divergence ───────────────────────────────────────────────────────────
+  const obvBullishDiv = obvData?.divergence === 'bullish'  // price down, OBV up → accumulation
+  const obvBearishDiv = obvData?.divergence === 'bearish'  // price up, OBV down → distribution
+  const obvRising     = obvData?.rising === true
+
+  // ── VWAP band extension ──────────────────────────────────────────────────────
+  // Price > VWAP+2σ = overextended; don't chase longs.
+  // Price < VWAP-2σ = extreme oversold; reversal / scalp zone.
+  const overextendedLong  = vwapBands?.aboveSD2 === true
+  const overextendedShort = vwapBands?.belowSD2 === true
+
   const buildIntradayView = ({
     label,
     sentiment,
@@ -1502,8 +1729,45 @@ export function evaluateIntraday({
     executionDirection,
     blockerReason,
     setupPhase,
+    emaTrend,       // attach trend regime to every view so the frontend can display it
     reasons: viewReasons
   })
+
+  // ── ADX no-trend filter ──────────────────────────────────────────────────────
+  // If ADX is below 20 AND there's no gap/volume event to anchor a trade,
+  // the market is in a ranging phase — all directional signals are unreliable.
+  if (
+    adxValue != null &&
+    !adxTrending &&
+    Math.abs(effectiveGap) < 0.5 &&
+    !volumeSpike
+  ) {
+    reasons.push(`ADX ${adxValue} — market is ranging/choppy, no confirmed trend edge`)
+    return buildIntradayView({
+      label: 'Choppy Market – No ADX Trend',
+      sentiment: 'neutral',
+      biasDirection: 'long',
+      executionDirection: null,
+      blockerReason: 'adx_no_trend',
+      setupPhase: 'watch',
+      reasons
+    })
+  }
+
+  // ── VWAP overextension guard ─────────────────────────────────────────────────
+  // Price > VWAP+2σ without volume breakout = stretched too far, chasing risk.
+  if (overextendedLong && !breakoutConfirmed) {
+    reasons.push('Price is above VWAP +2σ — overextended, high mean-reversion risk')
+    return buildIntradayView({
+      label: 'Overextended – Wait for Pullback',
+      sentiment: 'positive',   // still bullish, just not entry-ready
+      biasDirection: 'long',
+      executionDirection: null,
+      blockerReason: 'vwap_overextended',
+      setupPhase: 'watch',
+      reasons
+    })
+  }
 
   // Protect against CHOP days - filter sideways markets
   if (
@@ -1604,7 +1868,7 @@ export function evaluateIntraday({
   ========================== */
   if (
     rsi >= 40 &&
-    rsi <= 65 &&
+    rsi <= rsiOverbought &&          // dynamic: 72 when bullishStack, else 65
     effectiveGap >= 0.2 &&
     effectiveGap < 3.5 &&
     volumeOK &&
@@ -1615,6 +1879,30 @@ export function evaluateIntraday({
     reasons.push('Price above VWAP shows bullish structure')
     reasons.push('RSI in optimal intraday zone')
     reasons.push(candleColor === 'green' ? 'Green candle confirms buying pressure' : 'Building momentum')
+    if (emaBullish)              reasons.push('EMA stack bullish — trade aligned with medium-term trend')
+    if (emaBearish)              reasons.push('⚠️ EMA stack bearish — counter-trend long, reduce size')
+    if (adxStrong)               reasons.push(`ADX ${adxValue} — strong confirmed trend, signals highly reliable`)
+    if (stCrossUp)               reasons.push('🔥 Supertrend just flipped bullish — fresh momentum trigger')
+    else if (stBullish)          reasons.push('Supertrend up — dynamic trailing support aligned')
+    if (hasStrongBullishBar)     reasons.push(`${candlePattern.pattern} candle pattern confirms buying pressure`)
+    if (obvBullishDiv)           reasons.push('📊 OBV bullish divergence — institutional accumulation detected')
+    else if (obvRising)          reasons.push('OBV rising — volume confirming price strength')
+
+    // Counter-trend long in a bearish EMA regime — demote to watch.
+    // The setup is real but the probability drops materially when
+    // every EMA is pointing down. Experienced traders can still take
+    // it at reduced size; less experienced traders should wait.
+    if (emaCounterLong) {
+      return buildIntradayView({
+        label: 'Strong Intraday Buy – Counter-Trend Risk',
+        sentiment: 'positive',
+        biasDirection: 'long',
+        executionDirection: null,
+        blockerReason: 'counter_trend_ema',
+        setupPhase: 'watch',
+        reasons
+      })
+    }
 
     return buildIntradayView({
       label: 'Strong Intraday Buy',
@@ -1629,7 +1917,7 @@ export function evaluateIntraday({
      1B️⃣ STRONG INTRADAY SELL
   ========================== */
   if (
-    rsi >= 35 &&
+    rsi >= rsiOversold &&            // dynamic: 28 when bearishStack, else 35
     rsi <= 60 &&
     effectiveGap <= -0.2 &&
     effectiveGap > -3.5 &&
@@ -1641,6 +1929,25 @@ export function evaluateIntraday({
     reasons.push('Price below VWAP shows bearish structure')
     reasons.push('RSI is aligned with downside continuation')
     reasons.push(candleColor === 'red' ? 'Red candle confirms selling pressure' : 'Weak bounce, sellers still in control')
+    if (emaBearish)          reasons.push('EMA stack bearish — trade aligned with medium-term trend')
+    if (emaBullish)          reasons.push('⚠️ EMA stack bullish — counter-trend short, reduce size')
+    if (adxStrong)           reasons.push(`ADX ${adxValue} — strong confirmed trend, downside signals reliable`)
+    if (stCrossDown)         reasons.push('🔥 Supertrend just flipped bearish — fresh sell signal')
+    else if (!stBullish && supertrend != null) reasons.push('Supertrend down — overhead resistance aligned')
+    if (hasStrongBearishBar) reasons.push(`${candlePattern.pattern} candle pattern confirms selling pressure`)
+    if (obvBearishDiv)       reasons.push('📊 OBV bearish divergence — institutional distribution detected')
+
+    if (emaCounterShort) {
+      return buildIntradayView({
+        label: 'Strong Intraday Sell – Counter-Trend Risk',
+        sentiment: 'negative',
+        biasDirection: 'short',
+        executionDirection: null,
+        blockerReason: 'counter_trend_ema',
+        setupPhase: 'watch',
+        reasons
+      })
+    }
 
     return buildIntradayView({
       label: 'Strong Intraday Sell',
@@ -1656,7 +1963,7 @@ export function evaluateIntraday({
   ========================== */
   if (
     rsi >= 45 &&
-    rsi <= 65 &&
+    rsi <= (emaBullish ? 70 : 65) &&  // dynamic: relax to 70 in confirmed bull trend
     aboveVWAP &&
     effectiveGap >= -0.2
   ) {
@@ -1775,11 +2082,17 @@ export function evaluateIntraday({
     reasons.push(volumeSpike ? 'Volume confirms interest' : 'Awaiting volume confirmation')
     reasons.push(candleColor === 'green' ? 'Bullish bias' : 'Consolidating with upside potential')
 
+    // "Watch" label = monitor only; no immediate execution. Setting executionDirection
+    // here caused these setups to bleed into the actionable scan results, polluting
+    // the signal list with unconfirmed ideas. setupPhase:'watch' correctly gates them
+    // out via buildIntradayExecutionMeta's isWatchPhase check.
     return buildIntradayView({
       label: 'Moderate Momentum - Watch',
       sentiment: 'positive',
       biasDirection: 'long',
-      executionDirection: 'long',
+      executionDirection: null,
+      blockerReason: 'confirmation_pending',
+      setupPhase: 'watch',
       reasons
     })
   }
@@ -1821,11 +2134,16 @@ export function evaluateIntraday({
     reasons.push(volumeSpike ? 'Volume suggests impending move' : 'Low volatility - add to watchlist')
     reasons.push(aboveVWAP ? 'Above VWAP provides support' : 'Below VWAP - needs confirmation')
 
+    // Pure "watch" — direction is unconfirmed until a breakout triggers.
+    // executionDirection:'long' was incorrectly marking this as actionable;
+    // it would pass the scan filter and appear alongside confirmed setups.
     return buildIntradayView({
       label: 'Consolidation Watch',
       sentiment: 'positive',
       biasDirection: 'long',
-      executionDirection: 'long',
+      executionDirection: null,
+      blockerReason: 'awaiting_breakout_confirmation',
+      setupPhase: 'watch',
       reasons
     })
   }
@@ -1833,8 +2151,8 @@ export function evaluateIntraday({
   /* =========================
      6️⃣ AVOID - OVERBOUGHT/DISTRIBUTION
   ========================== */
-  if (rsi > 70) {
-    reasons.push('RSI in distribution zone (>70) - institutions selling')
+  if (rsi > rsiOverbought) {  // dynamic: 72 in confirmed bullish EMA regime, else 65
+    reasons.push(`RSI in distribution zone (>${rsiOverbought}) — institutions selling`)
     reasons.push('High risk of reversal or profit booking')
     reasons.push('Unfavorable risk-reward for fresh entries')
     reasons.push('Avoid fresh entries - scalp only if experienced')

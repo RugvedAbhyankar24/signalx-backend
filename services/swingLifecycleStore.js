@@ -24,9 +24,13 @@ function getISTDateString(now = new Date()) {
 }
 
 function isWeekend(dateString) {
-  const date = new Date(`${dateString}T00:00:00+05:30`);
-  const day = date.getUTCDay();
-  return day === 0 || day === 6;
+  // Parse as UTC midnight so getUTCDay() returns the correct calendar weekday.
+  // Using +05:30 offset and getUTCDay() causes midnight IST to resolve to the
+  // previous UTC day — Saturday IST becomes Friday UTC (5) and slips through.
+  const [year, month, day] = dateString.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  const dow = date.getUTCDay();
+  return dow === 0 || dow === 6;
 }
 
 function isTradingHoliday(dateString) {
